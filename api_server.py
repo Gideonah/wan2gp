@@ -257,10 +257,13 @@ def generate_video_internal(
     Internal function to generate video using the loaded model.
     Returns (output_path, generation_time)
     """
-    global model_instance, model_def
+    global model_instance, model_def, current_model_type
     
     if model_instance is None:
         raise RuntimeError("Model not loaded")
+    
+    # Import wgp utilities
+    from wgp import get_transformer_model
     
     # Validate dimensions
     width = (width // 16) * 16
@@ -286,6 +289,13 @@ def generate_video_internal(
         # Resize image to target dimensions
         image_start = image_start.resize((width, height), Image.LANCZOS)
         input_video = convert_image_to_tensor(image_start).unsqueeze(1)
+    
+    # Set up transformer cache (required by the model)
+    trans = get_transformer_model(model_instance)
+    trans.cache = None  # Disable step caching for simplicity
+    trans2 = get_transformer_model(model_instance, 2)
+    if trans2 is not None:
+        trans2.cache = None
     
     # Set interrupt flag
     model_instance._interrupt = False
