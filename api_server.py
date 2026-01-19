@@ -319,7 +319,9 @@ def generate_video_internal(
     }
     
     # Dummy callback function (required by generate)
-    def progress_callback(step, latents=None, force_update=False, **kwargs):
+    # Signature must match: callback(step, latents, force_update, show_latents, **kwargs)
+    def progress_callback(*args, **kwargs):
+        step = args[0] if len(args) > 0 else -1
         if step >= 0:
             print(f"   Step {step + 1}/{num_inference_steps}")
     
