@@ -308,6 +308,16 @@ def generate_video_internal(
     # Set interrupt flag
     model_instance._interrupt = False
     
+    # Empty loras configuration (no loras active)
+    loras_slists = {
+        "phase1": [],
+        "phase2": [],
+        "phase3": [],
+        "shared": [],
+        "model_switch_step": num_inference_steps,
+        "model_switch_step2": num_inference_steps,
+    }
+    
     # Run generation
     try:
         result = model_instance.generate(
@@ -325,6 +335,7 @@ def generate_video_internal(
             callback=None,
             VAE_tile_size=0,  # Auto-detect
             model_type=current_model_type,
+            loras_slists=loras_slists,
         )
         
         # Extract video tensor
