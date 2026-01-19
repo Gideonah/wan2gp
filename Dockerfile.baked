@@ -1,0 +1,132 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Wan2GP API Server with Pre-Baked Model Weights
+# 
+# This Dockerfile creates an image with model weights included,
+# eliminating the 14GB download on each cold start.
+#
+# BUILD PROCESS (run on a GPU machine):
+#   1. docker build -f Dockerfile.baked -t wan2gp-api:baked .
+#   2. docker push YOUR_REGISTRY/wan2gp-api:baked
+#
+# RUN:
+#   docker run --gpus all -p 8000:8000 wan2gp-api:baked
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies
+RUN apt update && \
+    apt install -y \
+    python3 python3-pip git wget curl cmake ninja-build \
+    libgl1 libglib2.0-0 ffmpeg && \
+    apt clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+
+COPY requirements.txt .
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install -r requirements.txt
+
+# PyTorch with CUDA
+RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124
+
+# FastAPI for API server
+RUN pip install fastapi uvicorn python-multipart
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SageAttention (compile for target GPU architectures)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
+ENV FORCE_CUDA="1"
+ENV MAX_JOBS="1"
+
+COPY <<EOF /tmp/patch_setup.py
+import os
+with open('setup.py', 'r') as f:
+    content = f.read()
+
+arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST')
+arch_set = '{' + ', '.join([f'"{arch}"' for arch in arch_list.split(';')]) + '}'
+
+old_section = '''compute_capabilities = set()
+device_count = torch.cuda.device_count()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 8:
+        warnings.warn(f"skipping GPU {i} with compute capability {major}.{minor}")
+        continue
+    compute_capabilities.add(f"{major}.{minor}")'''
+
+new_section = 'compute_capabilities = ' + arch_set + '''
+print(f"Manually set compute capabilities: {compute_capabilities}")'''
+
+content = content.replace(old_section, new_section)
+
+with open('setup.py', 'w') as f:
+    f.write(content)
+EOF
+
+RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
+    cd /tmp/sageattention && \
+    python3 /tmp/patch_setup.py && \
+    pip install --no-build-isolation . && \
+    rm -rf /tmp/sageattention
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application Code
+# ─────────────────────────────────────────────────────────────────────────────
+
+COPY . /workspace/
+
+# Create directories
+RUN mkdir -p /workspace/outputs /workspace/ckpts
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download Model Weights (THIS IS THE KEY STEP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Set cache directory inside the image
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# Download model weights during build
+# NOTE: This requires running docker build on a machine with a GPU
+#       or you can skip this and download manually after
+RUN python3 -c "\
+import os; \
+os.environ['HF_HOME'] = '/workspace/.cache/huggingface'; \
+from huggingface_hub import snapshot_download; \
+print('Downloading Wan2.1 model...'); \
+snapshot_download('DeepBeepMeep/Wan2.1', local_dir='/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1'); \
+print('Done!'); \
+" || echo "Weight download skipped (no GPU during build)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENV WAN2GP_MODEL_TYPE="t2v"
+ENV WAN2GP_PROFILE="5"
+ENV WAN2GP_PORT="8000"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+EXPOSE 8000
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Start the API server
+CMD ["python3", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
+
