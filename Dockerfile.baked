@@ -78,11 +78,14 @@ with open('setup.py', 'w') as f:
     f.write(content)
 EOF
 
+# SageAttention compilation requires CUDA toolkit at build time
+# If building on a machine without GPU, this will be skipped and 
+# the model will fall back to standard attention (slightly slower)
 RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
     cd /tmp/sageattention && \
     python3 /tmp/patch_setup.py && \
     pip install --no-build-isolation . && \
-    rm -rf /tmp/sageattention
+    rm -rf /tmp/sageattention || echo "⚠️  SageAttention skipped (no CUDA during build)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Application Code
@@ -101,16 +104,15 @@ RUN mkdir -p /workspace/outputs /workspace/ckpts
 ENV HF_HOME=/workspace/.cache/huggingface
 
 # Download model weights during build
-# NOTE: This requires running docker build on a machine with a GPU
-#       or you can skip this and download manually after
+# This does NOT require a GPU - it's just downloading files from Hugging Face
 RUN python3 -c "\
 import os; \
 os.environ['HF_HOME'] = '/workspace/.cache/huggingface'; \
 from huggingface_hub import snapshot_download; \
-print('Downloading Wan2.1 model...'); \
-snapshot_download('DeepBeepMeep/Wan2.1', local_dir='/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1'); \
-print('Done!'); \
-" || echo "Weight download skipped (no GPU during build)"
+print('Downloading Wan2.1 model (~14GB)...'); \
+snapshot_download('DeepBeepMeep/Wan2.1', local_dir='/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1', local_dir_use_symlinks=False); \
+print('✅ Model weights downloaded!'); \
+"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration

@@ -2,15 +2,8 @@
 #
 # Bake Wan2GP Docker Image with Model Weights
 #
-# Run this script on a Vast.ai instance to:
-# 1. Download model weights
-# 2. Build a Docker image with weights included
-# 3. Push to Docker Hub (or other registry)
-#
-# Prerequisites:
-#   - Docker installed (Vast.ai instances have Docker)
-#   - GPU available (for downloading weights)
-#   - Docker Hub account (or other registry)
+# This script builds the image using Dockerfile.baked.
+# For faster builds, it pre-downloads weights before building.
 #
 # Usage:
 #   ./bake_docker_image.sh YOUR_DOCKERHUB_USERNAME
@@ -40,85 +33,22 @@ if [ ! -f "api_server.py" ]; then
     exit 1
 fi
 
-# Step 1: Download model weights first (faster than doing it in Docker build)
-echo "📥 Step 1: Downloading model weights..."
-mkdir -p /workspace/.cache/huggingface
+if [ ! -f "Dockerfile.baked" ]; then
+    echo "❌ Error: Dockerfile.baked not found"
+    exit 1
+fi
 
-python3 << 'EOF'
-import os
-os.environ['HF_HOME'] = '/workspace/.cache/huggingface'
+# Step 1: Build Docker image using Dockerfile.baked
+echo "🐳 Step 1: Building Docker image..."
+echo "   (Model weights will be downloaded during build)"
 
-from huggingface_hub import snapshot_download
-
-print("Downloading Wan2.1 base model...")
-snapshot_download(
-    "DeepBeepMeep/Wan2.1",
-    local_dir="/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1",
-    local_dir_use_symlinks=False
-)
-
-print("✅ Model weights downloaded!")
-EOF
-
-# Step 2: Build Docker image
-echo ""
-echo "🐳 Step 2: Building Docker image..."
-
-# Create a temporary Dockerfile that copies the pre-downloaded weights
-cat > Dockerfile.baked.local << 'DOCKERFILE'
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/workspace/.cache/huggingface
-
-RUN apt update && \
-    apt install -y python3 python3-pip git wget curl libgl1 libglib2.0-0 ffmpeg && \
-    apt clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /workspace
-
-# Copy pre-downloaded weights FIRST (for layer caching)
-COPY .cache/huggingface /workspace/.cache/huggingface/
-
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install -r requirements.txt && \
-    pip install fastapi uvicorn python-multipart && \
-    pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-        torch==2.6.0+cu124 torchvision==0.21.0+cu124
-
-# Copy application code
-COPY . /workspace/
-
-# Create directories
-RUN mkdir -p /workspace/outputs
-
-ENV WAN2GP_MODEL_TYPE="t2v"
-ENV WAN2GP_PROFILE="5"
-ENV WAN2GP_PORT="8000"
-ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
-
-EXPOSE 8000
-
-CMD ["python3", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
-DOCKERFILE
-
-# Copy the cache directory to the build context
-cp -r /workspace/.cache .cache 2>/dev/null || true
-
-docker build -f Dockerfile.baked.local -t ${FULL_IMAGE} .
-
-# Cleanup
-rm -f Dockerfile.baked.local
-rm -rf .cache
+docker build -f Dockerfile.baked -t ${FULL_IMAGE} .
 
 echo "✅ Docker image built: ${FULL_IMAGE}"
 
-# Step 3: Push to registry
+# Step 2: Push to registry
 echo ""
-echo "📤 Step 3: Pushing to Docker Hub..."
+echo "📤 Step 2: Pushing to Docker Hub..."
 echo "   (Make sure you're logged in: docker login)"
 
 read -p "Push to Docker Hub? (y/n) " -n 1 -r
@@ -138,4 +68,3 @@ echo ""
 echo "  To run on any GPU machine:"
 echo "    docker run --gpus all -p 8000:8000 ${FULL_IMAGE}"
 echo "═══════════════════════════════════════════════════════════════════"
-
