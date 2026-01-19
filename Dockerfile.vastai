@@ -115,55 +115,10 @@ RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/nu
 ENV HF_HOME=/workspace/.cache/huggingface
 
 # Download ONLY the files needed for t2v (text-to-video)
-# The full repo is ~50GB+, but t2v only needs ~14GB
-#
-# To use a different model (i2v, vace, etc.), modify T2V_PATTERNS below
-#
-RUN python3 << 'EOF'
-import os
-os.environ['HF_HOME'] = '/workspace/.cache/huggingface'
-
-from huggingface_hub import snapshot_download
-
-REPO_ID = "DeepBeepMeep/Wan2.1"
-LOCAL_DIR = "/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1"
-
-# Patterns for t2v model
-# Note: Using quantized (int8) saves ~50% disk/memory
-T2V_PATTERNS = [
-    # ─── T2V Transformer (choose ONE) ───
-    # "wan2.1_text2video_14B_mbf16.safetensors",              # ~14GB, best quality
-    "wan2.1_text2video_14B_quanto_mbf16_int8.safetensors",    # ~7GB, quantized
-    
-    # ─── CLIP Text Encoder ───
-    "xlm-roberta-large/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors",
-    "xlm-roberta-large/sentencepiece.bpe.model",
-    "xlm-roberta-large/special_tokens_map.json",
-    "xlm-roberta-large/tokenizer.json",
-    "xlm-roberta-large/tokenizer_config.json",
-    
-    # ─── T5 Text Encoder ───
-    "umt5-xxl/special_tokens_map.json",
-    "umt5-xxl/spiece.model",
-    "umt5-xxl/tokenizer.json", 
-    "umt5-xxl/tokenizer_config.json",
-    "umt5-xxl-enc-quanto_int8.safetensors",
-    
-    # ─── VAE ───
-    "Wan2.1_VAE.safetensors",
-]
-
-print("📥 Downloading Wan2.1 t2v model (quantized, ~12GB total)...")
-
-snapshot_download(
-    repo_id=REPO_ID,
-    local_dir=LOCAL_DIR,
-    allow_patterns=T2V_PATTERNS,
-    local_dir_use_symlinks=False,
-)
-
-print("✅ Wan2.1 t2v model downloaded!")
-EOF
+# The full repo is ~50GB+, but t2v only needs ~12GB
+# To use a different model, modify download_model.py
+COPY download_model.py /tmp/download_model.py
+RUN python3 /tmp/download_model.py && rm /tmp/download_model.py
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
