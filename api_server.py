@@ -28,6 +28,60 @@ import base64
 import io
 import traceback
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRITICAL: Parse our arguments BEFORE importing wgp.py
+# wgp.py parses sys.argv at import time, so we must handle this first
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_api_args():
+    """Parse API server arguments before wgp.py can interfere"""
+    parser = argparse.ArgumentParser(description="Wan2GP API Server", add_help=False)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--model-type", type=str, default=os.environ.get("WAN2GP_MODEL_TYPE", "t2v"))
+    parser.add_argument("--profile", type=int, default=int(os.environ.get("WAN2GP_PROFILE", "5")))
+    parser.add_argument("--reload", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    
+    args, unknown = parser.parse_known_args()
+    
+    if args.help:
+        print("""
+Wan2GP API Server
+
+Usage:
+    python api_server.py [OPTIONS]
+
+Options:
+    --host          Host to bind to (default: 0.0.0.0)
+    --port          Port to listen on (default: 8000)
+    --model-type    Model type to load: t2v, i2v, vace_14B, etc. (default: t2v)
+    --profile       MMGP memory profile 1-6 (default: 5)
+    --reload        Enable auto-reload for development
+
+Environment Variables:
+    WAN2GP_MODEL_TYPE   Default model type
+    WAN2GP_PROFILE      Default profile
+    WAN2GP_OUTPUT_DIR   Output directory for videos
+        """)
+        sys.exit(0)
+    
+    return args
+
+# Parse our args first
+_api_args = parse_api_args()
+
+# Store our settings before clearing argv
+API_HOST = _api_args.host
+API_PORT = _api_args.port
+API_MODEL_TYPE = _api_args.model_type
+API_PROFILE = _api_args.profile
+API_RELOAD = _api_args.reload
+
+# Clear sys.argv so wgp.py's parser doesn't see our arguments
+# Keep only the script name
+sys.argv = [sys.argv[0]]
+
 # Add the Wan2GP root to path
 ROOT_DIR = Path(__file__).parent.absolute()
 if str(ROOT_DIR) not in sys.path:
@@ -45,7 +99,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
 
-# Wan2GP imports
+# Now it's safe to import from wgp/mmgp
 from mmgp import offload
 from shared.utils.audio_video import save_video
 
@@ -53,8 +107,8 @@ from shared.utils.audio_video import save_video
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DEFAULT_MODEL_TYPE = os.environ.get("WAN2GP_MODEL_TYPE", "t2v")
-DEFAULT_PROFILE = int(os.environ.get("WAN2GP_PROFILE", "5"))
+DEFAULT_MODEL_TYPE = API_MODEL_TYPE
+DEFAULT_PROFILE = API_PROFILE
 OUTPUT_DIR = Path(os.environ.get("WAN2GP_OUTPUT_DIR", "/workspace/outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -457,38 +511,26 @@ async def reload_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFA
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="Wan2GP API Server")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
-    parser.add_argument("--model-type", type=str, default=DEFAULT_MODEL_TYPE, 
-                       help="Model type to load (t2v, i2v, vace_14B, etc.)")
-    parser.add_argument("--profile", type=int, default=DEFAULT_PROFILE,
-                       help="MMGP memory profile (1-6, higher = more memory)")
-    parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
-    
-    args = parser.parse_args()
-    
-    # Set environment variables for model loading
-    os.environ["WAN2GP_MODEL_TYPE"] = args.model_type
-    os.environ["WAN2GP_PROFILE"] = str(args.profile)
+    # Arguments were already parsed at module load time (before wgp import)
+    # Use the pre-parsed values
     
     print(f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                        WAN2GP API SERVER                                      ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
-║  Host:       {args.host}                                                       
-║  Port:       {args.port}                                                       
-║  Model:      {args.model_type}                                                 
-║  Profile:    {args.profile}                                                    
+║  Host:       {API_HOST}                                                       
+║  Port:       {API_PORT}                                                       
+║  Model:      {API_MODEL_TYPE}                                                 
+║  Profile:    {API_PROFILE}                                                    
 ║  Output Dir: {OUTPUT_DIR}                                                      
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     """)
     
     uvicorn.run(
         "api_server:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
+        host=API_HOST,
+        port=API_PORT,
+        reload=API_RELOAD,
         workers=1,  # Single worker for GPU
     )
 
