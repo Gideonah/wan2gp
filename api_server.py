@@ -318,6 +318,11 @@ def generate_video_internal(
         "model_switch_step2": num_inference_steps,
     }
     
+    # Dummy callback function (required by generate)
+    def progress_callback(step, latents=None, force_update=False, **kwargs):
+        if step >= 0:
+            print(f"   Step {step + 1}/{num_inference_steps}")
+    
     # Run generation
     try:
         result = model_instance.generate(
@@ -332,7 +337,7 @@ def generate_video_internal(
             shift=flow_shift,
             seed=seed,
             sample_solver=sample_solver,
-            callback=None,
+            callback=progress_callback,
             VAE_tile_size=0,  # Auto-detect
             model_type=current_model_type,
             loras_slists=loras_slists,
