@@ -1,15 +1,20 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# Wan2GP API Server with Pre-Baked Model Weights
+# Wan2GP for Vast.ai Serverless with Pre-Baked Model Weights
 # 
-# This Dockerfile creates an image with model weights included,
-# eliminating the 14GB download on each cold start.
+# This Dockerfile creates an image optimized for Vast.ai serverless deployment:
+#   - Model weights baked in (no cold start downloads)
+#   - PyWorker integration for Vast's serverless routing
+#   - Log-based readiness detection
+#   - Benchmarking support for autoscaling
 #
-# BUILD PROCESS (run on a GPU machine):
-#   1. docker build -f Dockerfile.baked -t wan2gp-api:baked .
-#   2. docker push YOUR_REGISTRY/wan2gp-api:baked
+# BUILD PROCESS (run on a GPU machine for SageAttention):
+#   docker build -f Dockerfile.vastai -t YOUR_REGISTRY/wan2gp-vastai:latest .
+#   docker push YOUR_REGISTRY/wan2gp-vastai:latest
 #
-# RUN:
-#   docker run --gpus all -p 8000:8000 wan2gp-api:baked
+# VAST.AI TEMPLATE SETTINGS:
+#   Image: YOUR_REGISTRY/wan2gp-vastai:latest
+#   Docker Options: --gpus all
+#   On-Start Script: /workspace/start_pyworker.sh
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -43,6 +48,13 @@ RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
 
 # FastAPI for API server
 RUN pip install fastapi uvicorn python-multipart
+
+# Vast.ai PyWorker SDK
+RUN pip install vastai
+
+# NLTK for benchmark text generation
+RUN pip install nltk && \
+    python3 -c "import nltk; nltk.download('words', quiet=True)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SageAttention (compile for target GPU architectures)
@@ -78,9 +90,6 @@ with open('setup.py', 'w') as f:
     f.write(content)
 EOF
 
-# SageAttention compilation requires CUDA toolkit at build time
-# If building on a machine without GPU, this will be skipped and 
-# the model will fall back to standard attention (slightly slower)
 RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
     cd /tmp/sageattention && \
     python3 /tmp/patch_setup.py && \
@@ -94,41 +103,90 @@ RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && 
 COPY . /workspace/
 
 # Create directories
-RUN mkdir -p /workspace/outputs /workspace/ckpts
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
+
+# Make scripts executable
+RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download Model Weights (THIS IS THE KEY STEP)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Set cache directory inside the image
 ENV HF_HOME=/workspace/.cache/huggingface
 
-# Download model weights during build
-# This does NOT require a GPU - it's just downloading files from Hugging Face
-RUN python3 -c "\
-import os; \
-os.environ['HF_HOME'] = '/workspace/.cache/huggingface'; \
-from huggingface_hub import snapshot_download; \
-print('Downloading Wan2.1 model (~14GB)...'); \
-snapshot_download('DeepBeepMeep/Wan2.1', local_dir='/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1', local_dir_use_symlinks=False); \
-print('✅ Model weights downloaded!'); \
-"
+# Download ONLY the files needed for t2v (text-to-video)
+# The full repo is ~50GB+, but t2v only needs ~14GB
+#
+# To use a different model (i2v, vace, etc.), modify T2V_PATTERNS below
+#
+RUN python3 << 'EOF'
+import os
+os.environ['HF_HOME'] = '/workspace/.cache/huggingface'
+
+from huggingface_hub import snapshot_download
+
+REPO_ID = "DeepBeepMeep/Wan2.1"
+LOCAL_DIR = "/workspace/.cache/huggingface/hub/models--DeepBeepMeep--Wan2.1"
+
+# Patterns for t2v model
+# Note: Using quantized (int8) saves ~50% disk/memory
+T2V_PATTERNS = [
+    # ─── T2V Transformer (choose ONE) ───
+    # "wan2.1_text2video_14B_mbf16.safetensors",              # ~14GB, best quality
+    "wan2.1_text2video_14B_quanto_mbf16_int8.safetensors",    # ~7GB, quantized
+    
+    # ─── CLIP Text Encoder ───
+    "xlm-roberta-large/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors",
+    "xlm-roberta-large/sentencepiece.bpe.model",
+    "xlm-roberta-large/special_tokens_map.json",
+    "xlm-roberta-large/tokenizer.json",
+    "xlm-roberta-large/tokenizer_config.json",
+    
+    # ─── T5 Text Encoder ───
+    "umt5-xxl/special_tokens_map.json",
+    "umt5-xxl/spiece.model",
+    "umt5-xxl/tokenizer.json", 
+    "umt5-xxl/tokenizer_config.json",
+    "umt5-xxl-enc-quanto_int8.safetensors",
+    
+    # ─── VAE ───
+    "Wan2.1_VAE.safetensors",
+]
+
+print("📥 Downloading Wan2.1 t2v model (quantized, ~12GB total)...")
+
+snapshot_download(
+    repo_id=REPO_ID,
+    local_dir=LOCAL_DIR,
+    allow_patterns=T2V_PATTERNS,
+    local_dir_use_symlinks=False,
+)
+
+print("✅ Wan2.1 t2v model downloaded!")
+EOF
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Model configuration
 ENV WAN2GP_MODEL_TYPE="t2v"
 ENV WAN2GP_PROFILE="5"
-ENV WAN2GP_PORT="8000"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 
-EXPOSE 8000
+# Backend API server port (internal)
+ENV MODEL_SERVER_PORT="8000"
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Log file for PyWorker monitoring
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 
-# Start the API server
-CMD ["python3", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
+# Vast.ai will expose port 80 for the PyWorker
+EXPOSE 80
+
+# Healthcheck via the PyWorker proxy
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:80/health || exit 1
+
+# Start the PyWorker (which starts the backend API server)
+CMD ["/workspace/start_pyworker.sh"]
 

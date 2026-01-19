@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 #
-# Bake Wan2GP Docker Image with Model Weights
+# Build Wan2GP Docker Image for Vast.ai Serverless
 #
-# This script builds the image using Dockerfile.baked.
-# For faster builds, it pre-downloads weights before building.
+# This script builds and optionally pushes the Vast.ai-ready image
+# with baked model weights and PyWorker integration.
 #
 # Usage:
-#   ./bake_docker_image.sh YOUR_DOCKERHUB_USERNAME
+#   ./build_vastai_image.sh YOUR_DOCKERHUB_USERNAME
 #
 # Example:
-#   ./bake_docker_image.sh gideonah
-#   # Creates: gideonah/wan2gp-api:baked
+#   ./build_vastai_image.sh gideonah
+#   # Creates: gideonah/wan2gp-vastai:latest
 #
 
 set -e
 
 DOCKER_USERNAME=${1:-"your-username"}
-IMAGE_NAME="wan2gp-api"
-TAG="baked"
+IMAGE_NAME="wan2gp-vastai"
+TAG="latest"
 FULL_IMAGE="${DOCKER_USERNAME}/${IMAGE_NAME}:${TAG}"
 
 echo "═══════════════════════════════════════════════════════════════════"
-echo "  Wan2GP Docker Image Baking Script"
+echo "  Wan2GP Vast.ai Serverless Image Builder"
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
 echo "  Image: ${FULL_IMAGE}"
@@ -33,17 +33,24 @@ if [ ! -f "api_server.py" ]; then
     exit 1
 fi
 
-if [ ! -f "Dockerfile.baked" ]; then
-    echo "❌ Error: Dockerfile.baked not found"
+if [ ! -f "Dockerfile.vastai" ]; then
+    echo "❌ Error: Dockerfile.vastai not found"
     exit 1
 fi
 
-# Step 1: Build Docker image using Dockerfile.baked
+if [ ! -f "worker.py" ]; then
+    echo "❌ Error: worker.py not found"
+    exit 1
+fi
+
+# Step 1: Build Docker image
 echo "🐳 Step 1: Building Docker image..."
-echo "   (Model weights will be downloaded during build)"
+echo "   (Model weights will be downloaded during build - this takes a while)"
+echo ""
 
-docker build -f Dockerfile.baked -t ${FULL_IMAGE} .
+docker build -f Dockerfile.vastai -t ${FULL_IMAGE} .
 
+echo ""
 echo "✅ Docker image built: ${FULL_IMAGE}"
 
 # Step 2: Push to registry
@@ -63,8 +70,20 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════"
-echo "  Done! Your baked image: ${FULL_IMAGE}"
+echo "  Done! Your Vast.ai-ready image: ${FULL_IMAGE}"
 echo ""
-echo "  To run on any GPU machine:"
-echo "    docker run --gpus all -p 8000:8000 ${FULL_IMAGE}"
+echo "  VAST.AI TEMPLATE SETTINGS:"
+echo "    Image:          ${FULL_IMAGE}"
+echo "    Docker Options: --gpus all"
+echo "    On-Start Script: /workspace/start_pyworker.sh"
+echo ""
+echo "  ENVIRONMENT VARIABLES (optional):"
+echo "    WAN2GP_MODEL_TYPE: t2v, i2v, vace_14B (default: t2v)"
+echo "    WAN2GP_PROFILE:    1-6 (default: 5)"
+echo ""
+echo "  ENDPOINTS:"
+echo "    POST /generate/t2v  - Text-to-Video generation"
+echo "    POST /generate/i2v  - Image-to-Video generation"
+echo "    GET  /health        - Health check"
 echo "═══════════════════════════════════════════════════════════════════"
+
