@@ -297,6 +297,14 @@ def generate_video_internal(
     if trans2 is not None:
         trans2.cache = None
     
+    # Set up offload shared state (required by generate)
+    offload.shared_state["_attention"] = "sdpa"  # Default attention mode
+    offload.shared_state["_chipmunk"] = False
+    offload.shared_state["_radial"] = False
+    offload.shared_state["_nag_scale"] = 1.0
+    offload.shared_state["_nag_tau"] = 3.5
+    offload.shared_state["_nag_alpha"] = 0.5
+    
     # Set interrupt flag
     model_instance._interrupt = False
     
