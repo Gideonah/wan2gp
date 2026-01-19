@@ -189,21 +189,16 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
         get_model_def, 
         get_base_model_type, 
         get_model_handler,
-        set_profiles,
-        args as wgp_args
     )
-    
-    # Set profile for memory optimization
-    set_profiles(profile, profile)
-    wgp_args.profile = profile
     
     # Get model definitions
     model_def = get_model_def(model_type)
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(base_model_type)
     
-    # Load the model
-    model_instance, offloadobj = load_models(model_type)
+    # Load the model with the specified profile
+    # override_profile parameter controls memory optimization level
+    model_instance, offloadobj = load_models(model_type, override_profile=profile)
     current_model_type = model_type
     
     load_time = time.time() - start_time
