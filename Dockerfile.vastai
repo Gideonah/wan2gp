@@ -1,8 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# Wan2GP for Vast.ai Serverless with Pre-Baked Model Weights
+# Wan2GP for Vast.ai Serverless
 # 
-# This Dockerfile creates an image optimized for Vast.ai serverless deployment:
-#   - Model weights baked in (no cold start downloads)
+# This Dockerfile creates an image optimized for Vast.ai deployment:
+#   - Models downloaded at runtime (smaller image, ~20GB vs ~34GB)
 #   - PyWorker integration for Vast's serverless routing
 #   - Log-based readiness detection
 #   - Benchmarking support for autoscaling
@@ -15,6 +15,9 @@
 #   Image: YOUR_REGISTRY/wan2gp-vastai:latest
 #   Docker Options: --gpus all
 #   On-Start Script: /workspace/start_pyworker.sh
+#
+# NOTE: First startup will download model weights (~12GB for t2v).
+#       Mount a persistent volume to /workspace/.cache for faster restarts.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -51,12 +54,8 @@ RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
 # FastAPI for API server
 RUN pip install fastapi uvicorn python-multipart
 
-# Vast.ai PyWorker SDK
-RUN pip install vastai vastai-sdk
-
-# NLTK for benchmark text generation
-RUN pip install nltk && \
-    python3 -c "import nltk; nltk.download('words', quiet=True)"
+# Download NLTK data (package installed via requirements.txt)
+RUN python3 -c "import nltk; nltk.download('words', quiet=True)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SageAttention (compile for target GPU architectures)
@@ -111,20 +110,11 @@ RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Download Model Weights (THIS IS THE KEY STEP)
-# ─────────────────────────────────────────────────────────────────────────────
-
-ENV HF_HOME=/workspace/.cache/huggingface
-
-# Download ONLY the files needed for t2v (text-to-video)
-# The full repo is ~50GB+, but t2v only needs ~12GB
-# To use a different model, modify download_model.py
-COPY download_model.py /tmp/download_model.py
-RUN python3 /tmp/download_model.py && rm /tmp/download_model.py
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
 # ─────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace cache (models downloaded at runtime)
+ENV HF_HOME=/workspace/.cache/huggingface
 
 # Model configuration
 ENV WAN2GP_MODEL_TYPE="t2v"
