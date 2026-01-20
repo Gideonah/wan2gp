@@ -1,22 +1,23 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# Wan2GP for Vast.ai Serverless
+# LTX-2 Distilled Video Generation for Vast.ai Serverless
 # 
 # This Dockerfile creates an image optimized for Vast.ai deployment:
-#   - Models downloaded at runtime (smaller image, ~20GB vs ~34GB)
+#   - LTX-2 Distilled model for fast image-to-video generation
+#   - Models downloaded at runtime (smaller image)
 #   - PyWorker integration for Vast's serverless routing
 #   - Log-based readiness detection
 #   - Benchmarking support for autoscaling
 #
 # BUILD PROCESS (run on a GPU machine for SageAttention):
-#   docker build -f Dockerfile.vastai -t YOUR_REGISTRY/wan2gp-vastai:latest .
-#   docker push YOUR_REGISTRY/wan2gp-vastai:latest
+#   docker build -f Dockerfile.vastai -t YOUR_REGISTRY/ltx2-vastai:latest .
+#   docker push YOUR_REGISTRY/ltx2-vastai:latest
 #
 # VAST.AI TEMPLATE SETTINGS:
-#   Image: YOUR_REGISTRY/wan2gp-vastai:latest
+#   Image: YOUR_REGISTRY/ltx2-vastai:latest
 #   Docker Options: --gpus all
 #   On-Start Script: /workspace/start_pyworker.sh
 #
-# NOTE: First startup will download model weights (~12GB for t2v).
+# NOTE: First startup will download model weights (~20-25GB for LTX-2 distilled).
 #       Mount a persistent volume to /workspace/.cache for faster restarts.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -28,12 +29,13 @@ ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies
+# System dependencies (minimal install)
 RUN apt update && \
-    apt install -y \
+    apt install -y --no-install-recommends \
     python3 python3-pip git wget curl cmake ninja-build \
-    libgl1 libglib2.0-0 ffmpeg && \
-    apt clean && rm -rf /var/lib/apt/lists/*
+    libgl1 libglib2.0-0 ffmpeg ca-certificates && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /workspace
 
@@ -42,20 +44,17 @@ WORKDIR /workspace
 # ─────────────────────────────────────────────────────────────────────────────
 
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel
-RUN pip install -r requirements.txt
 
-# Install core dependencies
-
-# PyTorch with CUDA (torch, torchvision, torchaudio)
-RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
-
-# FastAPI for API server
-RUN pip install fastapi uvicorn python-multipart
-
-# Download NLTK data (package installed via requirements.txt)
-RUN python3 -c "import nltk; nltk.download('words', quiet=True)"
+# Install all Python dependencies in one layer with cache cleanup
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
+    pip install --no-cache-dir fastapi uvicorn python-multipart httpx && \
+    python3 -c "import nltk; nltk.download('words', quiet=True)" && \
+    rm -rf /root/.cache/pip /tmp/* && \
+    find /usr/local -name "*.pyc" -delete && \
+    find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SageAttention (compile for target GPU architectures)
@@ -91,11 +90,12 @@ with open('setup.py', 'w') as f:
     f.write(content)
 EOF
 
-RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
+RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
     cd /tmp/sageattention && \
     python3 /tmp/patch_setup.py && \
-    pip install --no-build-isolation . && \
-    rm -rf /tmp/sageattention || echo "⚠️  SageAttention skipped (no CUDA during build)"
+    pip install --no-cache-dir --no-build-isolation . && \
+    rm -rf /tmp/sageattention /tmp/patch_setup.py /root/.cache/* || \
+    echo "⚠️  SageAttention skipped (no CUDA during build)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Application Code
@@ -116,8 +116,8 @@ RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/nu
 # HuggingFace cache (models downloaded at runtime)
 ENV HF_HOME=/workspace/.cache/huggingface
 
-# Model configuration
-ENV WAN2GP_MODEL_TYPE="t2v"
+# Model configuration (LTX-2 Distilled)
+ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
 ENV WAN2GP_PROFILE="5"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Vast.ai PyWorker Entrypoint for Wan2GP
+# Vast.ai PyWorker Entrypoint for LTX-2 Distilled Video Generation
 #
 # This script:
 #   1. Sets up the environment
-#   2. Starts the Wan2GP API server (backend) with logs to file
+#   2. Starts the LTX-2 API server (backend) with logs to file
 #   3. Runs the PyWorker proxy
 #
 # Environment Variables:
-#   WAN2GP_MODEL_TYPE: Model to load (default: t2v)
+#   WAN2GP_MODEL_TYPE: Model to load (default: ltx2_distilled)
 #   WAN2GP_PROFILE: MMGP profile 1-6 (default: 5)
 #   MODEL_SERVER_PORT: Backend API port (default: 8000)
 #   WAN2GP_OUTPUT_DIR: Output directory (default: /workspace/outputs)
@@ -38,8 +38,8 @@ export TORCH_ALLOW_TF32_CUDNN=1
 export SDL_AUDIODRIVER=dummy
 export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
 
-# API configuration
-export WAN2GP_MODEL_TYPE=${WAN2GP_MODEL_TYPE:-"t2v"}
+# API configuration (default to LTX-2 Distilled)
+export WAN2GP_MODEL_TYPE=${WAN2GP_MODEL_TYPE:-"ltx2_distilled"}
 export WAN2GP_PROFILE=${WAN2GP_PROFILE:-"5"}
 export MODEL_SERVER_PORT=${MODEL_SERVER_PORT:-"8000"}
 export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
@@ -90,7 +90,7 @@ echo "════════════════════════�
 # ═══════════════════════════════════════════════════════════════════════════════
 
 echo "" | tee -a "$WAN2GP_LOG_FILE"
-echo "🚀 Starting Wan2GP API Server (backend)..." | tee -a "$WAN2GP_LOG_FILE"
+echo "🚀 Starting LTX-2 API Server (backend)..." | tee -a "$WAN2GP_LOG_FILE"
 echo "   Model Type: $WAN2GP_MODEL_TYPE" | tee -a "$WAN2GP_LOG_FILE"
 echo "   Profile:    $WAN2GP_PROFILE" | tee -a "$WAN2GP_LOG_FILE"
 echo "   Port:       $MODEL_SERVER_PORT" | tee -a "$WAN2GP_LOG_FILE"
