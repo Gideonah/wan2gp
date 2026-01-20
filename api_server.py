@@ -663,6 +663,15 @@ def generate_video_internal(
                 audio_tensor = torch.from_numpy(audio_data)
             else:
                 audio_tensor = audio_data
+            # Ensure audio is in (channels, samples) format for torchaudio
+            # LTX2 returns (samples, channels) so we need to transpose
+            if audio_tensor.dim() == 1:
+                # Mono audio without channel dim -> (1, samples)
+                audio_tensor = audio_tensor.unsqueeze(0)
+            elif audio_tensor.dim() == 2:
+                # If shape is (samples, channels) where samples >> channels, transpose to (channels, samples)
+                if audio_tensor.shape[0] > audio_tensor.shape[1] and audio_tensor.shape[1] in (1, 2):
+                    audio_tensor = audio_tensor.T
             temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
             output_path.rename(temp_video_path)
             remux_with_audio(temp_video_path, output_path, audio_tensor, audio_sr)
