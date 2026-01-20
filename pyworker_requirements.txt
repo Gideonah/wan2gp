@@ -4,6 +4,6 @@
 # Note: Most deps are already in the baked Docker image.
 # This file is for the PyWorker-specific requirements only.
 
-vastai
+vastai-sdk
 nltk
 

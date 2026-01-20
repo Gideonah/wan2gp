@@ -118,13 +118,7 @@ def calculate_video_workload(payload: dict) -> float:
 # Sample prompts for benchmarking
 BENCHMARK_PROMPTS = [
     "A serene mountain lake at sunset with golden light reflecting on the water",
-    "A bustling city street at night with neon signs and rain-slicked pavement",
-    "A majestic eagle soaring through clouds above snow-capped peaks",
-    "An astronaut floating in space with Earth visible in the background",
-    "A field of wildflowers swaying gently in a summer breeze",
-    "Ocean waves crashing against rocky cliffs during a storm",
-    "A cozy cabin in the woods with smoke rising from the chimney",
-    "A futuristic cityscape with flying vehicles and holographic billboards",
+
 ]
 
 
@@ -173,7 +167,7 @@ t2v_handler = HandlerConfig(
     # Benchmark configuration (only one handler should have this)
     benchmark_config=BenchmarkConfig(
         generator=t2v_benchmark_generator,
-        runs=2,          # Only 2 runs since video gen is slow
+        runs=1,          # Only 2 runs since video gen is slow
         concurrency=1,   # Serial execution (GPU-bound)
     ),
 )

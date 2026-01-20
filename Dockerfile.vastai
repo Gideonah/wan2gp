@@ -42,9 +42,9 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel
 RUN pip install -r requirements.txt
 
-# PyTorch with CUDA
+# PyTorch with CUDA (torch, torchvision, torchaudio)
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.6.0+cu124 torchvision==0.21.0+cu124
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
 
 # FastAPI for API server
 RUN pip install fastapi uvicorn python-multipart
