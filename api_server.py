@@ -658,9 +658,14 @@ def generate_video_internal(
         # Mux audio if present
         if audio_data is not None:
             from postprocessing.mmaudio.data.av_utils import remux_with_audio
+            # Convert numpy array to torch tensor if needed
+            if isinstance(audio_data, np.ndarray):
+                audio_tensor = torch.from_numpy(audio_data)
+            else:
+                audio_tensor = audio_data
             temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
             output_path.rename(temp_video_path)
-            remux_with_audio(temp_video_path, output_path, audio_data, audio_sr)
+            remux_with_audio(temp_video_path, output_path, audio_tensor, audio_sr)
             temp_video_path.unlink(missing_ok=True)
         
     except Exception as e:
