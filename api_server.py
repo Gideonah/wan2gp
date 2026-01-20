@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Wan2GP API Server for Serverless Deployment (Vast.ai, RunPod, Modal)
+Wan2GP Multi-Model API Server for Serverless Deployment
 
-This FastAPI server provides a REST API interface to Wan2GP's video generation
-capabilities, designed for serverless GPU deployments.
+This FastAPI server provides a REST API interface to multiple generation models:
+- Z-Image: Text-to-Image generation
+- LTX-2 Distilled: Image-to-Video generation (fast, with audio)
+- Wan2.2 I2V Lightning v2: Image-to-Video generation (4 steps, enhanced prompts)
 
-Optimized for LTX-2 Distilled Image-to-Video generation.
+Designed for serverless GPU deployments (Vast.ai, RunPod, Modal).
 
 Usage:
-    python api_server.py [--port 8000] [--model-type ltx2_distilled] [--profile 5]
+    python api_server.py [--port 8000] [--model-type ltx2_distilled|z_image|i2v_2_2_lightning_v2]
 
 Environment Variables:
-    WAN2GP_MODEL_TYPE: Default model type to load (default: ltx2_distilled)
+    WAN2GP_MODEL_TYPE: Default model type to load
     WAN2GP_PROFILE: MMGP profile for memory optimization (1-6, default: 5)
-    WAN2GP_OUTPUT_DIR: Directory to save generated videos (default: /workspace/outputs)
+    WAN2GP_OUTPUT_DIR: Directory to save generated outputs
 """
 
 import os
@@ -25,7 +27,7 @@ import asyncio
 import argparse
 import httpx
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Literal
 from contextlib import asynccontextmanager
 import base64
 import io
@@ -50,7 +52,7 @@ def parse_api_args():
     
     if args.help:
         print("""
-Wan2GP API Server (LTX-2 Distilled)
+Wan2GP Multi-Model API Server
 
 Usage:
     python api_server.py [OPTIONS]
@@ -58,14 +60,17 @@ Usage:
 Options:
     --host          Host to bind to (default: 0.0.0.0)
     --port          Port to listen on (default: 8000)
-    --model-type    Model type to load (default: ltx2_distilled)
+    --model-type    Model type to load:
+                      - ltx2_distilled (default) - LTX-2 Image-to-Video
+                      - z_image - Z-Image Text-to-Image  
+                      - i2v_2_2_Enhanced_Lightning_v2 - Wan2.2 I2V Lightning v2
     --profile       MMGP memory profile 1-6 (default: 5)
     --reload        Enable auto-reload for development
 
 Environment Variables:
-    WAN2GP_MODEL_TYPE   Default model type (default: ltx2_distilled)
+    WAN2GP_MODEL_TYPE   Default model type
     WAN2GP_PROFILE      Default profile
-    WAN2GP_OUTPUT_DIR   Output directory for videos
+    WAN2GP_OUTPUT_DIR   Output directory
         """)
         sys.exit(0)
     
@@ -82,7 +87,6 @@ API_PROFILE = _api_args.profile
 API_RELOAD = _api_args.reload
 
 # Clear sys.argv so wgp.py's parser doesn't see our arguments
-# Keep only the script name
 sys.argv = [sys.argv[0]]
 
 # Add the Wan2GP root to path
@@ -115,23 +119,62 @@ DEFAULT_PROFILE = API_PROFILE
 OUTPUT_DIR = Path(os.environ.get("WAN2GP_OUTPUT_DIR", "/workspace/outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# LTX-2 specific settings
-LTX2_FPS = 24  # LTX-2 native FPS
-LTX2_MIN_FRAMES = 17  # Minimum frames
-LTX2_FRAME_STEP = 8  # Frames increment in steps of 8
-LTX2_RESOLUTION_DIVISOR = 64  # Must be divisible by 64 for distilled pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODEL-SPECIFIC CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Resolution presets for LTX-2
+# LTX-2 settings
+LTX2_FPS = 24
+LTX2_MIN_FRAMES = 17
+LTX2_FRAME_STEP = 8
+LTX2_RESOLUTION_DIVISOR = 64
+
+# Wan2.2 settings  
+WAN22_FPS = 16
+WAN22_MIN_FRAMES = 5
+WAN22_FRAME_STEP = 4
+WAN22_RESOLUTION_DIVISOR = 16
+
+# Z-Image settings
+ZIMAGE_RESOLUTION_DIVISOR = 64
+
+# Model family detection
+MODEL_FAMILIES = {
+    "ltx2_distilled": "ltx2",
+    "ltx2_19B": "ltx2",
+    "z_image": "z_image",
+    "z_image_control": "z_image",
+    "z_image_control2": "z_image",
+    "i2v_2_2": "wan22",
+    "i2v_2_2_Enhanced_Lightning_v2": "wan22",
+}
+
+# Resolution presets per model family
 RESOLUTION_PRESETS = {
-    "480p": (832, 480),       # ~16:9 landscape
+    "ltx2": {
+        "480p": (832, 480),
     "480p_portrait": (480, 832),
-    "720p": (1280, 720),      # 16:9 HD
+        "720p": (1280, 720),
     "720p_portrait": (720, 1280),
-    "768": (768, 768),        # Square
-    "1024": (1024, 1024),     # Square HD
-    "landscape": (1024, 576), # 16:9
-    "portrait": (576, 1024),  # 9:16
-    "wide": (1280, 576),      # Ultra-wide
+        "768": (768, 768),
+        "1024": (1024, 1024),
+    },
+    "wan22": {
+        "480p": (848, 480),
+        "480p_portrait": (480, 848),
+        "720p": (1280, 720),
+        "720p_portrait": (720, 1280),
+        "576p": (1024, 576),
+        "576p_portrait": (576, 1024),
+    },
+    "z_image": {
+        "512": (512, 512),
+        "768": (768, 768),
+        "1024": (1024, 1024),
+        "landscape": (1024, 768),
+        "portrait": (768, 1024),
+        "wide": (1280, 768),
+    },
 }
 
 # Global model reference
@@ -139,22 +182,50 @@ model_instance = None
 model_handler = None
 model_def = None
 current_model_type = None
+current_model_family = None
 offloadobj = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PYDANTIC MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class ZImageRequest(BaseModel):
+    """Request model for Z-Image text-to-image generation"""
+    prompt: str = Field(..., description="Text prompt describing the image")
+    negative_prompt: str = Field("", description="Negative prompt (not used in turbo mode)")
+    
+    resolution_preset: Optional[str] = Field(
+        "1024",
+        description="Resolution preset: 512, 768, 1024, landscape, portrait, wide"
+    )
+    width: Optional[int] = Field(None, description="Image width (must be multiple of 64)")
+    height: Optional[int] = Field(None, description="Image height (must be multiple of 64)")
+    
+    num_inference_steps: int = Field(8, ge=4, le=20, description="Number of denoising steps (8 for turbo)")
+    guidance_scale: float = Field(0.0, ge=0.0, le=10.0, description="CFG scale (0 for turbo)")
+    seed: int = Field(-1, description="Random seed (-1 for random)")
+    batch_size: int = Field(1, ge=1, le=4, description="Number of images to generate")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "prompt": "A majestic lion in a savanna at sunset, photorealistic, 8k",
+                "resolution_preset": "1024",
+                "num_inference_steps": 8,
+                "seed": -1
+            }
+        }
+
+
 class LTX2ImageToVideoRequest(BaseModel):
-    """Request model for LTX-2 image-to-video generation with URL input"""
+    """Request model for LTX-2 image-to-video generation"""
     prompt: str = Field(..., description="Text prompt describing the video motion/action")
     image_url: str = Field(..., description="URL of the input image to animate")
     duration: float = Field(5.0, ge=0.7, le=20.0, description="Video duration in seconds (0.7-20)")
     
-    # Resolution options - use EITHER preset OR width/height
     resolution_preset: Optional[str] = Field(
         None, 
-        description="Resolution preset: 480p, 720p, 768, 1024, landscape, portrait, wide"
+        description="Resolution preset: 480p, 720p, 768, 1024"
     )
     width: Optional[int] = Field(None, description="Video width (must be multiple of 64)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 64)")
@@ -175,40 +246,76 @@ class LTX2ImageToVideoRequest(BaseModel):
         }
 
 
+class Wan22ImageToVideoRequest(BaseModel):
+    """Request model for Wan2.2 I2V Lightning v2 generation"""
+    prompt: str = Field(..., description="Text prompt describing the video (supports temporal markers)")
+    image_url: str = Field(..., description="URL of the input image to animate")
+    duration: float = Field(5.0, ge=0.3, le=15.0, description="Video duration in seconds")
+    
+    resolution_preset: Optional[Literal["480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
+        "480p",
+        description="Resolution preset: 480p, 720p, 576p (and portrait variants)"
+    )
+    width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
+    height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
+    
+    # Lightning v2 uses fixed 4 steps and guidance 1.0
+    num_inference_steps: int = Field(4, ge=4, le=8, description="Inference steps (4 for Lightning v2)")
+    guidance_scale: float = Field(1.0, ge=1.0, le=5.0, description="CFG scale (1.0 for Lightning v2)")
+    flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter")
+    seed: int = Field(-1, description="Random seed (-1 for random)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "prompt": "(at 0 seconds: wide shot of a woman standing, cinematic lighting). (at 2 seconds: camera slowly zooms in). (at 4 seconds: close-up on face, she smiles).",
+                "image_url": "https://example.com/portrait.jpg",
+                "duration": 5.0,
+                "resolution_preset": "480p",
+                "seed": -1
+            }
+        }
+
+
+class ImageToVideoRequest(BaseModel):
+    """Generic request model for image-to-video (base64 input)"""
+    prompt: str = Field(..., description="Text prompt describing the video")
+    image_base64: str = Field(..., description="Base64 encoded start image (PNG/JPEG)")
+    negative_prompt: str = Field("", description="Negative prompt")
+    duration: float = Field(5.0, ge=0.7, le=20.0, description="Video duration in seconds")
+    width: int = Field(768, description="Video width")
+    height: int = Field(512, description="Video height")
+    num_inference_steps: int = Field(8, description="Number of denoising steps")
+    guidance_scale: float = Field(4.0, description="Classifier-free guidance scale")
+    seed: int = Field(-1, description="Random seed (-1 for random)")
+
+
 class TextToVideoRequest(BaseModel):
     """Request model for text-to-video generation"""
     prompt: str = Field(..., description="Text prompt describing the video")
     negative_prompt: str = Field("", description="Negative prompt")
     duration: float = Field(5.0, ge=0.7, le=20.0, description="Video duration in seconds")
-    width: int = Field(768, description="Video width (must be multiple of 64)")
-    height: int = Field(512, description="Video height (must be multiple of 64)")
-    num_inference_steps: int = Field(8, description="Number of denoising steps (8 for distilled)")
-    guidance_scale: float = Field(4.0, description="Classifier-free guidance scale")
-    seed: int = Field(-1, description="Random seed (-1 for random)")
-
-
-class ImageToVideoRequest(BaseModel):
-    """Request model for image-to-video generation with base64"""
-    prompt: str = Field(..., description="Text prompt describing the video")
-    image_base64: str = Field(..., description="Base64 encoded start image (PNG/JPEG)")
-    negative_prompt: str = Field("", description="Negative prompt")
-    duration: float = Field(5.0, ge=0.7, le=20.0, description="Video duration in seconds")
-    width: int = Field(768, description="Video width (must be multiple of 64)")
-    height: int = Field(512, description="Video height (must be multiple of 64)")
-    num_inference_steps: int = Field(8, description="Number of denoising steps (8 for distilled)")
+    width: int = Field(768, description="Video width")
+    height: int = Field(512, description="Video height")
+    num_inference_steps: int = Field(8, description="Number of denoising steps")
     guidance_scale: float = Field(4.0, description="Classifier-free guidance scale")
     seed: int = Field(-1, description="Random seed (-1 for random)")
 
 
 class GenerationResponse(BaseModel):
-    """Response model for video generation"""
+    """Response model for generation requests"""
     status: str
     job_id: str
     message: Optional[str] = None
-    video_url: Optional[str] = None
+    output_url: Optional[str] = None
+    video_url: Optional[str] = None  # Alias for video responses
+    image_url: Optional[str] = None  # Alias for image responses
     generation_time_seconds: Optional[float] = None
     duration_seconds: Optional[float] = None
     num_frames: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    seed: Optional[int] = None
 
 
 class HealthResponse(BaseModel):
@@ -216,6 +323,7 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_type: Optional[str] = None
+    model_family: Optional[str] = None
     gpu_name: Optional[str] = None
     gpu_memory_total_mb: Optional[int] = None
     gpu_memory_used_mb: Optional[int] = None
@@ -225,51 +333,73 @@ class HealthResponse(BaseModel):
 # UTILITY FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def duration_to_frames(duration_seconds: float, fps: int = LTX2_FPS) -> int:
-    """
-    Convert duration in seconds to valid frame count for LTX-2.
-    LTX-2 requires frames = 17 + 8*n (minimum 17, steps of 8)
-    """
-    target_frames = int(duration_seconds * fps)
-    
-    # LTX-2: frames must be 17 + 8*n
+def get_model_family(model_type: str) -> str:
+    """Get the model family for a given model type"""
+    return MODEL_FAMILIES.get(model_type, "unknown")
+
+
+def duration_to_frames_ltx2(duration_seconds: float) -> int:
+    """Convert duration to valid frame count for LTX-2 (17 + 8*n)"""
+    target_frames = int(duration_seconds * LTX2_FPS)
     if target_frames < LTX2_MIN_FRAMES:
         return LTX2_MIN_FRAMES
-    
-    # Find nearest valid frame count: 17, 25, 33, 41, 49, ...
     n = max(0, (target_frames - LTX2_MIN_FRAMES) // LTX2_FRAME_STEP)
     valid_frames = LTX2_MIN_FRAMES + (n * LTX2_FRAME_STEP)
-    
-    # Check if rounding up is closer
     next_valid = valid_frames + LTX2_FRAME_STEP
     if abs(next_valid - target_frames) < abs(valid_frames - target_frames):
         valid_frames = next_valid
-    
     return valid_frames
 
 
+def duration_to_frames_wan22(duration_seconds: float) -> int:
+    """Convert duration to valid frame count for Wan2.2 (5 + 4*n)"""
+    target_frames = int(duration_seconds * WAN22_FPS)
+    if target_frames < WAN22_MIN_FRAMES:
+        return WAN22_MIN_FRAMES
+    n = max(0, (target_frames - WAN22_MIN_FRAMES) // WAN22_FRAME_STEP)
+    valid_frames = WAN22_MIN_FRAMES + (n * WAN22_FRAME_STEP)
+    next_valid = valid_frames + WAN22_FRAME_STEP
+    if abs(next_valid - target_frames) < abs(valid_frames - target_frames):
+        valid_frames = next_valid
+    return valid_frames
+
+
+def frames_to_duration(num_frames: int, fps: int) -> float:
+    """Convert frame count to duration in seconds"""
+    return round(num_frames / fps, 2)
+
+
 def resolve_resolution(
+    model_family: str,
     resolution_preset: Optional[str] = None,
     width: Optional[int] = None, 
     height: Optional[int] = None,
-    default_width: int = 768,
-    default_height: int = 512,
 ) -> tuple[int, int]:
-    """
-    Resolve resolution from preset or explicit width/height.
-    Returns (width, height) aligned to LTX2_RESOLUTION_DIVISOR (64).
-    """
+    """Resolve resolution from preset or explicit values for a model family"""
+    presets = RESOLUTION_PRESETS.get(model_family, RESOLUTION_PRESETS["ltx2"])
+    
     # Use preset if provided
-    if resolution_preset and resolution_preset in RESOLUTION_PRESETS:
-        return RESOLUTION_PRESETS[resolution_preset]
+    if resolution_preset and resolution_preset in presets:
+        return presets[resolution_preset]
+    
+    # Get divisor for model family
+    if model_family == "wan22":
+        divisor = WAN22_RESOLUTION_DIVISOR
+        default_w, default_h = 848, 480
+    elif model_family == "z_image":
+        divisor = ZIMAGE_RESOLUTION_DIVISOR
+        default_w, default_h = 1024, 1024
+    else:  # ltx2
+        divisor = LTX2_RESOLUTION_DIVISOR
+        default_w, default_h = 768, 512
     
     # Use explicit values or defaults
-    w = width if width is not None else default_width
-    h = height if height is not None else default_height
+    w = width if width is not None else default_w
+    h = height if height is not None else default_h
     
-    # Align to divisor (64 for distilled)
-    w = (w // LTX2_RESOLUTION_DIVISOR) * LTX2_RESOLUTION_DIVISOR
-    h = (h // LTX2_RESOLUTION_DIVISOR) * LTX2_RESOLUTION_DIVISOR
+    # Align to divisor
+    w = (w // divisor) * divisor
+    h = (h // divisor) * divisor
     
     # Ensure minimum size
     w = max(256, w)
@@ -278,22 +408,11 @@ def resolve_resolution(
     return w, h
 
 
-def frames_to_duration(num_frames: int, fps: int = LTX2_FPS) -> float:
-    """Convert frame count to duration in seconds"""
-    return round(num_frames / fps, 2)
-
-
 async def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
     """Fetch an image from a URL and return as PIL Image"""
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         response = await client.get(url)
         response.raise_for_status()
-        
-        content_type = response.headers.get("content-type", "")
-        if not content_type.startswith("image/"):
-            # Try to open anyway, PIL will validate
-            pass
-        
         image_bytes = response.content
         image = Image.open(io.BytesIO(image_bytes))
         return image.convert("RGB")
@@ -301,10 +420,8 @@ async def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
 
 def decode_base64_image(image_base64: str) -> Image.Image:
     """Decode a base64 string to PIL Image"""
-    # Handle data URL format
     if "," in image_base64:
         image_base64 = image_base64.split(",")[1]
-    
     image_bytes = base64.b64decode(image_base64)
     image = Image.open(io.BytesIO(image_bytes))
     return image.convert("RGB")
@@ -315,16 +432,12 @@ def decode_base64_image(image_base64: str) -> Image.Image:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAULT_PROFILE):
-    """
-    Load the Wan2GP model into VRAM.
-    This is called once at startup to keep the model warm.
-    """
-    global model_instance, model_handler, model_def, current_model_type, offloadobj
+    """Load the Wan2GP model into VRAM"""
+    global model_instance, model_handler, model_def, current_model_type, current_model_family, offloadobj
     
     print(f"⏳ Loading model: {model_type} (profile: {profile})...")
     start_time = time.time()
     
-    # Import wgp functions after setting up paths
     from wgp import (
         load_models, 
         get_model_def, 
@@ -332,20 +445,17 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
         get_model_handler,
     )
     
-    # Get model definitions
     model_def = get_model_def(model_type)
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(base_model_type)
     
-    # Load the model with the specified profile
-    # override_profile parameter controls memory optimization level
     model_instance, offloadobj = load_models(model_type, override_profile=profile)
     current_model_type = model_type
+    current_model_family = get_model_family(model_type)
     
     load_time = time.time() - start_time
-    print(f"✅ Model loaded in {load_time:.1f}s")
+    print(f"✅ Model loaded in {load_time:.1f}s (family: {current_model_family})")
     
-    # Print GPU info
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
         print(f"   GPU: {props.name}")
@@ -363,14 +473,102 @@ def unload_model():
         offloadobj = None
     
     model_instance = None
-    
     gc.collect()
     torch.cuda.empty_cache()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# VIDEO GENERATION
+# GENERATION FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_image_internal(
+    prompt: str,
+    negative_prompt: str = "",
+    width: int = 1024,
+    height: int = 1024,
+    num_inference_steps: int = 8,
+    guidance_scale: float = 0.0,
+    seed: int = -1,
+    batch_size: int = 1,
+) -> tuple[str, float, dict]:
+    """Generate image using Z-Image model"""
+    global model_instance, model_def
+    
+    if model_instance is None:
+        raise RuntimeError("Model not loaded")
+    
+    # Handle seed
+    if seed < 0:
+        seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
+    
+    job_id = str(uuid.uuid4())[:8]
+    output_path = OUTPUT_DIR / f"{job_id}.png"
+    
+    print(f"🖼️ Generating image: {prompt[:50]}...")
+    print(f"   Resolution: {width}x{height}, Steps: {num_inference_steps}")
+    
+    start_time = time.time()
+    
+    # Set up offload shared state
+    offload.shared_state["_attention"] = "sdpa"
+    offload.shared_state["_chipmunk"] = False
+    offload.shared_state["_radial"] = False
+    offload.shared_state["_nag_scale"] = 1.0
+    offload.shared_state["_nag_tau"] = 3.5
+    offload.shared_state["_nag_alpha"] = 0.5
+    
+    model_instance._interrupt = False
+    
+    loras_slists = {
+        "phase1": [], "phase2": [], "phase3": [], "shared": [],
+        "model_switch_step": num_inference_steps,
+        "model_switch_step2": num_inference_steps,
+    }
+    
+    try:
+        result = model_instance.generate(
+            input_prompt=prompt,
+            n_prompt=negative_prompt if negative_prompt else None,
+            width=width,
+            height=height,
+            sampling_steps=num_inference_steps,
+            guide_scale=guidance_scale,
+            seed=seed,
+            loras_slists=loras_slists,
+        )
+        
+        # Save image
+        if isinstance(result, dict):
+            image_tensor = result.get("x", result)
+        else:
+            image_tensor = result
+        
+        # Convert tensor to PIL and save
+        if hasattr(image_tensor, 'cpu'):
+            img_np = image_tensor.squeeze().permute(1, 2, 0).cpu().numpy()
+            img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+            Image.fromarray(img_np).save(str(output_path))
+        else:
+            image_tensor.save(str(output_path))
+            
+    except Exception as e:
+        traceback.print_exc()
+        raise RuntimeError(f"Generation failed: {str(e)}")
+    finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    generation_time = time.time() - start_time
+    print(f"✅ Image saved to {output_path} in {generation_time:.1f}s")
+    
+    metadata = {
+        "width": width,
+        "height": height,
+        "seed": seed,
+    }
+    
+    return str(output_path), generation_time, metadata
+
 
 def generate_video_internal(
     prompt: str,
@@ -381,31 +579,20 @@ def generate_video_internal(
     num_frames: int = 121,
     num_inference_steps: int = 8,
     guidance_scale: float = 4.0,
+    flow_shift: Optional[float] = None,
     seed: int = -1,
-    fps: int = LTX2_FPS,
+    fps: int = 24,
 ) -> tuple[str, float, dict]:
-    """
-    Internal function to generate video using the loaded model.
-    Returns (output_path, generation_time, metadata)
-    """
-    global model_instance, model_def, current_model_type
+    """Generate video using LTX-2 or Wan2.2 model"""
+    global model_instance, model_def, current_model_family
     
     if model_instance is None:
         raise RuntimeError("Model not loaded")
-    
-    # Validate dimensions for LTX-2 (must be multiples of 64)
-    width = (width // 64) * 64
-    height = (height // 64) * 64
-    
-    # Ensure minimum size
-    width = max(256, width)
-    height = max(256, height)
     
     # Handle seed
     if seed < 0:
         seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
     
-    # Create job ID and output path
     job_id = str(uuid.uuid4())[:8]
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
     
@@ -415,51 +602,45 @@ def generate_video_internal(
     
     start_time = time.time()
     
-    # Set up offload shared state (required by generate)
-    offload.shared_state["_attention"] = "sdpa"  # Default attention mode
+    # Set up offload shared state
+    offload.shared_state["_attention"] = "sdpa"
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
     offload.shared_state["_nag_scale"] = 1.0
     offload.shared_state["_nag_tau"] = 3.5
     offload.shared_state["_nag_alpha"] = 0.5
     
-    # Set interrupt flag
     model_instance._interrupt = False
     
-    # Empty loras configuration (no loras active)
     loras_slists = {
-        "phase1": [],
-        "phase2": [],
-        "phase3": [],
-        "shared": [],
+        "phase1": [], "phase2": [], "phase3": [], "shared": [],
         "model_switch_step": num_inference_steps,
         "model_switch_step2": num_inference_steps,
     }
     
-    # Progress callback
-    def progress_callback(*args, **kwargs):
-        step = args[0] if len(args) > 0 else -1
-        if step >= 0:
-            print(f"   Step {step + 1}/{num_inference_steps}")
+    # Build generation kwargs
+    gen_kwargs = {
+        "input_prompt": prompt,
+        "n_prompt": negative_prompt if negative_prompt else None,
+        "image_start": image_start,
+        "image_end": None,
+        "width": width,
+        "height": height,
+        "frame_num": num_frames,
+        "sampling_steps": num_inference_steps,
+        "guide_scale": guidance_scale,
+        "seed": seed,
+        "fps": float(fps),
+        "VAE_tile_size": 0,
+        "loras_slists": loras_slists,
+    }
     
-    # Run generation
+    # Add flow_shift for Wan2.2
+    if flow_shift is not None:
+        gen_kwargs["flow_shift"] = flow_shift
+    
     try:
-        result = model_instance.generate(
-            input_prompt=prompt,
-            n_prompt=negative_prompt if negative_prompt else None,
-            image_start=image_start,
-            image_end=None,
-            width=width,
-            height=height,
-            frame_num=num_frames,
-            sampling_steps=num_inference_steps,
-            guide_scale=guidance_scale,
-            seed=seed,
-            fps=float(fps),
-            callback=progress_callback,
-            VAE_tile_size=0,  # Auto-detect
-            loras_slists=loras_slists,
-        )
+        result = model_instance.generate(**gen_kwargs)
         
         # Extract video tensor and audio
         if isinstance(result, dict):
@@ -471,18 +652,21 @@ def generate_video_internal(
             audio_data = None
             audio_sr = 48000
         
-        # Save video (with audio if available)
+        # Save video (without audio first)
+        save_video(video_tensor, str(output_path), fps=fps)
+        
+        # Mux audio if present
         if audio_data is not None:
-            save_video(video_tensor, str(output_path), fps=fps, audio=audio_data, audio_sample_rate=audio_sr)
-        else:
-            save_video(video_tensor, str(output_path), fps=fps)
+            from postprocessing.mmaudio.data.av_utils import remux_with_audio
+            temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
+            output_path.rename(temp_video_path)
+            remux_with_audio(temp_video_path, output_path, audio_data, audio_sr)
+            temp_video_path.unlink(missing_ok=True)
         
     except Exception as e:
         traceback.print_exc()
         raise RuntimeError(f"Generation failed: {str(e)}")
-    
     finally:
-        # Cleanup
         gc.collect()
         torch.cuda.empty_cache()
     
@@ -508,8 +692,7 @@ def generate_video_internal(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan handler for model loading/unloading"""
-    # Startup: Load model
-    print("🚀 Starting Wan2GP API Server (LTX-2 Distilled)...")
+    print("🚀 Starting Wan2GP Multi-Model API Server...")
     try:
         load_wan2gp_model()
     except Exception as e:
@@ -518,29 +701,30 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown: Unload model
     print("🛑 Shutting down...")
     unload_model()
 
 
 app = FastAPI(
-    title="LTX-2 Video Generation API",
-    description="REST API for LTX-2 Distilled image-to-video generation",
-    version="2.0.0",
+    title="Wan2GP Multi-Model API",
+    description="REST API for Z-Image, LTX-2, and Wan2.2 generation",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-# Mount outputs directory for video downloads
+# Mount outputs directory
 app.mount("/download", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: HEALTH & INFO
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    gpu_name = None
-    gpu_memory_total = None
-    gpu_memory_used = None
+    gpu_name = gpu_memory_total = gpu_memory_used = None
     
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
@@ -552,72 +736,158 @@ async def health_check():
         status="healthy" if model_instance is not None else "degraded",
         model_loaded=model_instance is not None,
         model_type=current_model_type,
+        model_family=current_model_family,
         gpu_name=gpu_name,
         gpu_memory_total_mb=gpu_memory_total,
         gpu_memory_used_mb=gpu_memory_used,
     )
 
 
-@app.post("/generate/i2v", response_model=GenerationResponse)
-async def generate_image_to_video_url(request: LTX2ImageToVideoRequest):
+@app.get("/info")
+async def get_info():
+    """Get API and model information"""
+    return {
+        "api_version": "3.0.0",
+        "model_type": current_model_type,
+        "model_family": current_model_family,
+        "model_loaded": model_instance is not None,
+        "supported_models": {
+            "z_image": {
+                "type": "text-to-image",
+                "resolution_presets": RESOLUTION_PRESETS["z_image"],
+            },
+            "ltx2": {
+                "type": "image-to-video",
+                "fps": LTX2_FPS,
+                "min_frames": LTX2_MIN_FRAMES,
+                "frame_step": LTX2_FRAME_STEP,
+                "resolution_presets": RESOLUTION_PRESETS["ltx2"],
+            },
+            "wan22": {
+                "type": "image-to-video",
+                "fps": WAN22_FPS,
+                "min_frames": WAN22_MIN_FRAMES,
+                "frame_step": WAN22_FRAME_STEP,
+                "resolution_presets": RESOLUTION_PRESETS["wan22"],
+            },
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: Z-IMAGE (Text-to-Image)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/generate/image", response_model=GenerationResponse)
+async def generate_image(request: ZImageRequest):
     """
-    Generate a video from an image URL (LTX-2 Image-to-Video)
+    Generate an image from a text prompt (Z-Image)
     
-    This endpoint:
-    - Fetches the image from the provided URL
-    - Generates a video with the specified duration
-    - Returns a download URL for the generated video
-    
-    Resolution options:
-    - Use `resolution_preset`: "480p", "720p", "768", "1024", "landscape", "portrait", "wide"
-    - OR specify `width` and `height` directly (must be multiples of 64)
-    
-    Duration is automatically converted to the nearest valid frame count for LTX-2.
+    This endpoint uses Z-Image Turbo for fast text-to-image generation.
+    Recommended settings: 8 steps, guidance_scale 0.
     """
     if model_instance is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
+    if current_model_family != "z_image":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Wrong model loaded. Need z_image, got {current_model_family}. Use /reload endpoint."
+        )
+    
     job_id = str(uuid.uuid4())[:8]
     
     try:
-        # Resolve resolution from preset or explicit values
         width, height = resolve_resolution(
+            "z_image",
             resolution_preset=request.resolution_preset,
             width=request.width,
             height=request.height,
-            default_width=768,
-            default_height=512,
         )
         
-        # Fetch image from URL
+        output_path, gen_time, metadata = generate_image_internal(
+            prompt=request.prompt,
+            negative_prompt=request.negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
+            seed=request.seed,
+            batch_size=request.batch_size,
+        )
+        
+        filename = Path(output_path).name
+        return GenerationResponse(
+            status="success",
+            job_id=filename.replace(".png", ""),
+            output_url=f"/download/{filename}",
+            image_url=f"/download/{filename}",
+            generation_time_seconds=round(gen_time, 2),
+            width=metadata["width"],
+            height=metadata["height"],
+            seed=metadata["seed"],
+        )
+        
+    except Exception as e:
+        traceback.print_exc()
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: LTX-2 (Image-to-Video)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/generate/ltx2/i2v", response_model=GenerationResponse)
+async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest):
+    """
+    Generate a video from an image (LTX-2 Distilled Image-to-Video)
+    
+    Features:
+    - 8-step distilled inference (fast)
+    - Native audio generation
+    - 24 FPS output
+    
+    Resolution: Use preset (480p, 720p) or explicit width/height (multiples of 64).
+    Duration: Automatically converted to valid frame count (17 + 8*n).
+    """
+    if model_instance is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    if current_model_family != "ltx2":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Wrong model loaded. Need ltx2, got {current_model_family}. Use /reload endpoint."
+        )
+    
+    job_id = str(uuid.uuid4())[:8]
+    
+    try:
+        width, height = resolve_resolution(
+            "ltx2",
+            resolution_preset=request.resolution_preset,
+            width=request.width,
+            height=request.height,
+        )
+        
+        # Fetch and resize image
         print(f"📥 Fetching image from: {request.image_url[:80]}...")
         try:
             image_start = await fetch_image_from_url(request.image_url)
-            print(f"   Original image size: {image_start.size}")
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
         
-        # Resize image to target dimensions
         image_start = image_start.resize((width, height), Image.LANCZOS)
-        print(f"   Resized to: {width}x{height}")
         
-        # Convert duration to valid frame count
-        num_frames = duration_to_frames(request.duration)
-        actual_duration = frames_to_duration(num_frames)
-        
-        # LTX-2 distilled uses 8 inference steps
-        num_inference_steps = 8
+        num_frames = duration_to_frames_ltx2(request.duration)
+        actual_duration = frames_to_duration(num_frames, LTX2_FPS)
         
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
             image_start=image_start,
-            negative_prompt="",
             width=width,
             height=height,
             num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
+            num_inference_steps=8,  # LTX-2 distilled uses 8 steps
             guidance_scale=request.guidance_scale,
             seed=request.seed,
             fps=LTX2_FPS,
@@ -627,43 +897,151 @@ async def generate_image_to_video_url(request: LTX2ImageToVideoRequest):
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
+            output_url=f"/download/{filename}",
             video_url=f"/download/{filename}",
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
+            width=metadata["width"],
+            height=metadata["height"],
+            seed=metadata["seed"],
         )
         
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
-        return GenerationResponse(
-            status="error",
-            job_id=job_id,
-            message=str(e),
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: WAN2.2 (Image-to-Video Lightning v2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/generate/wan22/i2v", response_model=GenerationResponse)
+async def generate_wan22_i2v(request: Wan22ImageToVideoRequest):
+    """
+    Generate a video from an image (Wan2.2 I2V Lightning v2)
+    
+    Features:
+    - 4-step Lightning v2 inference (ultra-fast)
+    - Enhanced prompt comprehension with temporal markers
+    - Camera angle and cinematic movement support
+    - 16 FPS output
+    
+    Prompt format for temporal control:
+    "(at 0 seconds: description). (at 2 seconds: description)."
+    
+    Resolution: 480p or 720p (and portrait variants).
+    Duration: Automatically converted to valid frame count (5 + 4*n).
+    """
+    if model_instance is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    if current_model_family != "wan22":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Wrong model loaded. Need wan22, got {current_model_family}. Use /reload endpoint."
         )
+    
+    job_id = str(uuid.uuid4())[:8]
+    
+    try:
+        width, height = resolve_resolution(
+            "wan22",
+            resolution_preset=request.resolution_preset,
+            width=request.width,
+            height=request.height,
+        )
+        
+        # Fetch and resize image
+        print(f"📥 Fetching image from: {request.image_url[:80]}...")
+        try:
+            image_start = await fetch_image_from_url(request.image_url)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
+        
+        image_start = image_start.resize((width, height), Image.LANCZOS)
+        
+        num_frames = duration_to_frames_wan22(request.duration)
+        actual_duration = frames_to_duration(num_frames, WAN22_FPS)
+        
+        output_path, gen_time, metadata = generate_video_internal(
+            prompt=request.prompt,
+            image_start=image_start,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
+            flow_shift=request.flow_shift,
+            seed=request.seed,
+            fps=WAN22_FPS,
+        )
+        
+        filename = Path(output_path).name
+        return GenerationResponse(
+            status="success",
+            job_id=filename.replace(".mp4", ""),
+            output_url=f"/download/{filename}",
+            video_url=f"/download/{filename}",
+            generation_time_seconds=round(gen_time, 2),
+            duration_seconds=actual_duration,
+            num_frames=num_frames,
+            width=metadata["width"],
+            height=metadata["height"],
+            seed=metadata["seed"],
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: GENERIC (Legacy/Base64)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/generate/i2v", response_model=GenerationResponse)
+async def generate_i2v_legacy(request: LTX2ImageToVideoRequest):
+    """Legacy endpoint - routes to current model's I2V"""
+    if current_model_family == "ltx2":
+        return await generate_ltx2_i2v(request)
+    elif current_model_family == "wan22":
+        # Convert request
+        wan_request = Wan22ImageToVideoRequest(
+            prompt=request.prompt,
+            image_url=request.image_url,
+            duration=request.duration,
+            resolution_preset=request.resolution_preset if request.resolution_preset in ["480p", "720p"] else "480p",
+            guidance_scale=1.0,
+            seed=request.seed,
+        )
+        return await generate_wan22_i2v(wan_request)
+    else:
+        raise HTTPException(status_code=400, detail=f"Model family {current_model_family} doesn't support I2V")
 
 
 @app.post("/generate/i2v-base64", response_model=GenerationResponse)
-async def generate_image_to_video_base64(request: ImageToVideoRequest):
-    """
-    Generate a video from a base64-encoded image (alternative endpoint)
-    """
+async def generate_i2v_base64(request: ImageToVideoRequest):
+    """Generate video from base64 image"""
     if model_instance is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     job_id = str(uuid.uuid4())[:8]
     
     try:
-        # Decode the input image
         image_start = decode_base64_image(request.image_base64)
-        
-        # Resize to target dimensions
         image_start = image_start.resize((request.width, request.height), Image.LANCZOS)
         
-        # Convert duration to valid frame count
-        num_frames = duration_to_frames(request.duration)
-        actual_duration = frames_to_duration(num_frames)
+        if current_model_family == "ltx2":
+            num_frames = duration_to_frames_ltx2(request.duration)
+            fps = LTX2_FPS
+        else:
+            num_frames = duration_to_frames_wan22(request.duration)
+            fps = WAN22_FPS
         
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
@@ -675,13 +1053,16 @@ async def generate_image_to_video_base64(request: ImageToVideoRequest):
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
             seed=request.seed,
-            fps=LTX2_FPS,
+            fps=fps,
         )
         
         filename = Path(output_path).name
+        actual_duration = frames_to_duration(num_frames, fps)
+        
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
+            output_url=f"/download/{filename}",
             video_url=f"/download/{filename}",
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
@@ -690,27 +1071,24 @@ async def generate_image_to_video_base64(request: ImageToVideoRequest):
         
     except Exception as e:
         traceback.print_exc()
-        return GenerationResponse(
-            status="error",
-            job_id=job_id,
-            message=str(e),
-        )
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
 
 
 @app.post("/generate/t2v", response_model=GenerationResponse)
-async def generate_text_to_video(request: TextToVideoRequest):
-    """
-    Generate a video from a text prompt (Text-to-Video)
-    """
+async def generate_t2v(request: TextToVideoRequest):
+    """Generate video from text prompt"""
     if model_instance is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     job_id = str(uuid.uuid4())[:8]
     
     try:
-        # Convert duration to valid frame count
-        num_frames = duration_to_frames(request.duration)
-        actual_duration = frames_to_duration(num_frames)
+        if current_model_family == "ltx2":
+            num_frames = duration_to_frames_ltx2(request.duration)
+            fps = LTX2_FPS
+        else:
+            num_frames = duration_to_frames_wan22(request.duration)
+            fps = WAN22_FPS
         
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
@@ -721,13 +1099,16 @@ async def generate_text_to_video(request: TextToVideoRequest):
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
             seed=request.seed,
-            fps=LTX2_FPS,
+            fps=fps,
         )
         
         filename = Path(output_path).name
+        actual_duration = frames_to_duration(num_frames, fps)
+        
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
+            output_url=f"/download/{filename}",
             video_url=f"/download/{filename}",
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
@@ -736,67 +1117,61 @@ async def generate_text_to_video(request: TextToVideoRequest):
         
     except Exception as e:
         traceback.print_exc()
-        return GenerationResponse(
-            status="error",
-            job_id=job_id,
-            message=str(e),
-        )
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/download/{filename}")
-async def download_video(filename: str):
-    """Download a generated video by filename"""
+async def download_file(filename: str):
+    """Download a generated file by filename"""
     file_path = OUTPUT_DIR / filename
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Video not found")
-    return FileResponse(str(file_path), media_type="video/mp4", filename=filename)
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    media_type = "video/mp4" if filename.endswith(".mp4") else "image/png"
+    return FileResponse(str(file_path), media_type=media_type, filename=filename)
 
 
-@app.delete("/videos/{job_id}")
-async def delete_video(job_id: str):
-    """Delete a generated video"""
-    file_path = OUTPUT_DIR / f"{job_id}.mp4"
+@app.delete("/files/{job_id}")
+async def delete_file(job_id: str):
+    """Delete a generated file"""
+    for ext in [".mp4", ".png"]:
+        file_path = OUTPUT_DIR / f"{job_id}{ext}"
     if file_path.exists():
         file_path.unlink()
         return {"status": "deleted", "job_id": job_id}
-    raise HTTPException(status_code=404, detail="Video not found")
+    raise HTTPException(status_code=404, detail="File not found")
 
 
 @app.post("/reload")
-async def reload_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAULT_PROFILE):
-    """Reload the model (useful for switching model types)"""
-    global current_model_type
+async def reload_model(
+    model_type: str = DEFAULT_MODEL_TYPE, 
+    profile: int = DEFAULT_PROFILE
+):
+    """
+    Reload the model (for switching between model types)
+    
+    Available model types:
+    - ltx2_distilled: LTX-2 Image-to-Video
+    - z_image: Z-Image Text-to-Image
+    - i2v_2_2_Enhanced_Lightning_v2: Wan2.2 I2V Enhanced Lightning v2
+    """
+    global current_model_type, current_model_family
     
     try:
         unload_model()
         load_wan2gp_model(model_type, profile)
-        return {"status": "success", "model_type": current_model_type}
+        return {
+            "status": "success", 
+            "model_type": current_model_type,
+            "model_family": current_model_family,
+        }
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/info")
-async def get_info():
-    """Get API and model information"""
-    return {
-        "api_version": "2.0.0",
-        "model_type": current_model_type,
-        "model_loaded": model_instance is not None,
-        "settings": {
-            "fps": LTX2_FPS,
-            "min_frames": LTX2_MIN_FRAMES,
-            "frame_step": LTX2_FRAME_STEP,
-            "resolution_divisor": LTX2_RESOLUTION_DIVISOR,
-            "min_duration_seconds": round(LTX2_MIN_FRAMES / LTX2_FPS, 2),
-            "max_duration_seconds": 20.0,
-            "default_inference_steps": 8,
-            "resolution_presets": {
-                name: {"width": w, "height": h} 
-                for name, (w, h) in RESOLUTION_PRESETS.items()
-            },
-        }
-    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -804,19 +1179,23 @@ async def get_info():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    # Arguments were already parsed at module load time (before wgp import)
-    # Use the pre-parsed values
-    
     print(f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║                     LTX-2 VIDEO GENERATION API                                ║
+║                     WAN2GP MULTI-MODEL API SERVER                             ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
-║  Host:       {API_HOST:<60}
-║  Port:       {API_PORT:<60}
-║  Model:      {API_MODEL_TYPE:<60}
-║  Profile:    {API_PROFILE:<60}
-║  Output Dir: {str(OUTPUT_DIR):<60}
-║  FPS:        {LTX2_FPS:<60}
+║  Host:       {API_HOST:<60} ║
+║  Port:       {API_PORT:<60} ║
+║  Model:      {API_MODEL_TYPE:<60} ║
+║  Profile:    {API_PROFILE:<60} ║
+║  Output Dir: {str(OUTPUT_DIR):<60} ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  Endpoints:                                                                   ║
+║    POST /generate/image      - Z-Image text-to-image                          ║
+║    POST /generate/ltx2/i2v   - LTX-2 image-to-video                           ║
+║    POST /generate/wan22/i2v  - Wan2.2 Lightning v2 image-to-video             ║
+║    POST /reload              - Switch model type                              ║
+║    GET  /health              - Health check                                   ║
+║    GET  /info                - API information                                ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     """)
     
@@ -825,7 +1204,7 @@ def main():
         host=API_HOST,
         port=API_PORT,
         reload=API_RELOAD,
-        workers=1,  # Single worker for GPU
+        workers=1,
     )
 
 
