@@ -552,11 +552,21 @@ def generate_image_internal(
         
         # Convert tensor to PIL and save
         if hasattr(image_tensor, 'cpu'):
-            img_np = image_tensor.squeeze().permute(1, 2, 0).cpu().numpy()
-            img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+            # Convert bf16 -> float32 before numpy (numpy doesn't support bf16)
+            img_tensor = image_tensor.squeeze().float().cpu()
+            if img_tensor.dim() == 3 and img_tensor.shape[0] in (1, 3, 4):
+                img_tensor = img_tensor.permute(1, 2, 0)
+            img_np = img_tensor.numpy()
+            # Normalize to 0-255 range
+            if img_np.max() <= 1.0:
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+            else:
+                img_np = img_np.clip(0, 255).astype(np.uint8)
             Image.fromarray(img_np).save(str(output_path))
-        else:
+        elif isinstance(image_tensor, Image.Image):
             image_tensor.save(str(output_path))
+        else:
+            raise RuntimeError(f"Unknown image format: {type(image_tensor)}")
             
     except Exception as e:
         traceback.print_exc()
