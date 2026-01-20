@@ -554,14 +554,29 @@ def generate_image_internal(
         if hasattr(image_tensor, 'cpu'):
             # Convert bf16 -> float32 before numpy (numpy doesn't support bf16)
             img_tensor = image_tensor.squeeze().float().cpu()
+            
+            # Handle channel dimension (C, H, W) -> (H, W, C)
             if img_tensor.dim() == 3 and img_tensor.shape[0] in (1, 3, 4):
                 img_tensor = img_tensor.permute(1, 2, 0)
+            
+            # Handle grayscale
+            if img_tensor.dim() == 3 and img_tensor.shape[-1] == 1:
+                img_tensor = img_tensor.squeeze(-1)
+            
             img_np = img_tensor.numpy()
-            # Normalize to 0-255 range
+            
+            # Z-Image outputs in range [-1, 1], need to convert to [0, 255]
+            # Check if values are in negative range (indicates -1 to 1 normalization)
+            if img_np.min() < 0:
+                # Range is [-1, 1] -> convert to [0, 1] first
+                img_np = (img_np + 1.0) / 2.0
+            
+            # Now convert [0, 1] to [0, 255]
             if img_np.max() <= 1.0:
                 img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
             else:
                 img_np = img_np.clip(0, 255).astype(np.uint8)
+            
             Image.fromarray(img_np).save(str(output_path))
         elif isinstance(image_tensor, Image.Image):
             image_tensor.save(str(output_path))
@@ -724,8 +739,9 @@ def generate_video_internal(
 async def lifespan(app: FastAPI):
     """Lifespan handler for model loading/unloading"""
     print("🚀 Starting Wan2GP Multi-Model API Server...")
+    print(f"   Configured model: {DEFAULT_MODEL_TYPE}")
     try:
-        load_wan2gp_model()
+        load_wan2gp_model(DEFAULT_MODEL_TYPE, DEFAULT_PROFILE)
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
         traceback.print_exc()
