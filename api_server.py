@@ -44,7 +44,7 @@ def parse_api_args():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-type", type=str, default=os.environ.get("WAN2GP_MODEL_TYPE", "ltx2_distilled"))
-    parser.add_argument("--profile", type=int, default=int(os.environ.get("WAN2GP_PROFILE", "5")))
+    parser.add_argument("--profile", type=int, default=int(os.environ.get("WAN2GP_PROFILE", "3")))
     parser.add_argument("--reload", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
     
