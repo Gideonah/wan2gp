@@ -525,6 +525,12 @@ def generate_image_internal(
         "model_switch_step2": num_inference_steps,
     }
     
+    # Progress callback (required by some models like Z-Image)
+    def progress_callback(step, latents=None, force_update=False, total_steps=None, **kwargs):
+        if step >= 0:
+            steps_display = total_steps if total_steps else num_inference_steps
+            print(f"   Step {step + 1}/{steps_display}")
+    
     try:
         result = model_instance.generate(
             input_prompt=prompt,
@@ -534,6 +540,7 @@ def generate_image_internal(
             sampling_steps=num_inference_steps,
             guide_scale=guidance_scale,
             seed=seed,
+            callback=progress_callback,
             loras_slists=loras_slists,
         )
         
