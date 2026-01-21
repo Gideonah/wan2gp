@@ -100,7 +100,7 @@ os.environ["GRADIO_LANG"] = "en"
 import torch
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -826,7 +826,7 @@ async def get_info():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/generate/image", response_model=GenerationResponse)
-async def generate_image(request: ZImageRequest):
+async def generate_image(request: ZImageRequest, http_request: Request):
     """
     Generate an image from a text prompt (Z-Image)
     
@@ -864,11 +864,14 @@ async def generate_image(request: ZImageRequest):
         )
         
         filename = Path(output_path).name
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
+        
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".png", ""),
-            output_url=f"/download/{filename}",
-            image_url=f"/download/{filename}",
+            output_url=full_url,
+            image_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             width=metadata["width"],
             height=metadata["height"],
@@ -885,7 +888,7 @@ async def generate_image(request: ZImageRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/generate/ltx2/i2v", response_model=GenerationResponse)
-async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest):
+async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Request):
     """
     Generate a video from an image (LTX-2 Distilled Image-to-Video)
     
@@ -941,11 +944,14 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest):
         )
         
         filename = Path(output_path).name
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
+        
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
-            output_url=f"/download/{filename}",
-            video_url=f"/download/{filename}",
+            output_url=full_url,
+            video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -966,7 +972,7 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/generate/wan22/i2v", response_model=GenerationResponse)
-async def generate_wan22_i2v(request: Wan22ImageToVideoRequest):
+async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Request):
     """
     Generate a video from an image (Wan2.2 I2V Lightning v2)
     
@@ -1027,11 +1033,14 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest):
         )
         
         filename = Path(output_path).name
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
+        
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
-            output_url=f"/download/{filename}",
-            video_url=f"/download/{filename}",
+            output_url=full_url,
+            video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -1052,10 +1061,10 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/generate/i2v", response_model=GenerationResponse)
-async def generate_i2v_legacy(request: LTX2ImageToVideoRequest):
+async def generate_i2v_legacy(request: LTX2ImageToVideoRequest, http_request: Request):
     """Legacy endpoint - routes to current model's I2V"""
     if current_model_family == "ltx2":
-        return await generate_ltx2_i2v(request)
+        return await generate_ltx2_i2v(request, http_request)
     elif current_model_family == "wan22":
         # Convert request
         wan_request = Wan22ImageToVideoRequest(
@@ -1066,13 +1075,13 @@ async def generate_i2v_legacy(request: LTX2ImageToVideoRequest):
             guidance_scale=1.0,
             seed=request.seed,
         )
-        return await generate_wan22_i2v(wan_request)
+        return await generate_wan22_i2v(wan_request, http_request)
     else:
         raise HTTPException(status_code=400, detail=f"Model family {current_model_family} doesn't support I2V")
 
 
 @app.post("/generate/i2v-base64", response_model=GenerationResponse)
-async def generate_i2v_base64(request: ImageToVideoRequest):
+async def generate_i2v_base64(request: ImageToVideoRequest, http_request: Request):
     """Generate video from base64 image"""
     if model_instance is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -1105,12 +1114,14 @@ async def generate_i2v_base64(request: ImageToVideoRequest):
         
         filename = Path(output_path).name
         actual_duration = frames_to_duration(num_frames, fps)
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
-            output_url=f"/download/{filename}",
-            video_url=f"/download/{filename}",
+            output_url=full_url,
+            video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -1122,7 +1133,7 @@ async def generate_i2v_base64(request: ImageToVideoRequest):
 
 
 @app.post("/generate/t2v", response_model=GenerationResponse)
-async def generate_t2v(request: TextToVideoRequest):
+async def generate_t2v(request: TextToVideoRequest, http_request: Request):
     """Generate video from text prompt"""
     if model_instance is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -1151,12 +1162,14 @@ async def generate_t2v(request: TextToVideoRequest):
         
         filename = Path(output_path).name
         actual_duration = frames_to_duration(num_frames, fps)
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
             job_id=filename.replace(".mp4", ""),
-            output_url=f"/download/{filename}",
-            video_url=f"/download/{filename}",
+            output_url=full_url,
+            video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -1226,6 +1239,12 @@ async def reload_model(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    # CRITICAL: Set environment variables BEFORE uvicorn re-imports the module
+    # When uvicorn.run() is called with a string import path, it re-imports api_server.py
+    # At that point sys.argv is cleared, so we need env vars to pass the config
+    os.environ["WAN2GP_MODEL_TYPE"] = API_MODEL_TYPE
+    os.environ["WAN2GP_PROFILE"] = str(API_PROFILE)
+    
     print(f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                     WAN2GP MULTI-MODEL API SERVER                             ║
