@@ -162,6 +162,9 @@ def _get_gcp_credentials():
         # Decode the base64-encoded private key
         private_key = base64.b64decode(private_key_b64).decode('utf-8')
         
+        # Convert literal \n to actual newlines (JSON escaping issue)
+        private_key = private_key.replace('\\n', '\n')
+        
         # Build the credentials dict (in memory - never written to disk)
         credentials_info = {
             "type": "service_account",
