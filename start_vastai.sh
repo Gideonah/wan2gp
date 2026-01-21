@@ -17,6 +17,13 @@
 #   WAN2GP_PROFILE: MMGP profile 1-6 (default: 3)
 #   MODEL_SERVER_PORT: Backend API port (default: 8000)
 #
+# GCP Credentials (for uploading videos to Cloud Storage):
+#   GCP_PROJECT_ID: Your GCP project ID
+#   GCP_PRIVATE_KEY_ID: From service account JSON
+#   GCP_PRIVATE_KEY: The private key (with \n for newlines)
+#   GCP_CLIENT_EMAIL: Service account email
+#   GCP_CLIENT_ID: Service account client ID
+#
 
 set -e
 
@@ -51,6 +58,40 @@ export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
 export WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 export MODEL_LOG="$WAN2GP_LOG_FILE"  # For Vast's start_server.sh
 LOG_DIR=$(dirname "$WAN2GP_LOG_FILE")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GCP CREDENTIALS SETUP (from individual env vars)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# If GCP_CLIENT_EMAIL is set, reconstruct the service account JSON
+if [ -n "$GCP_CLIENT_EMAIL" ] && [ -n "$GCP_PRIVATE_KEY" ]; then
+    echo "🔑 Reconstructing GCP credentials from environment variables..."
+    
+    GCP_KEY_FILE="/workspace/gcp-key.json"
+    
+    # The private key has \n escaped - we need to preserve them as literal \n in JSON
+    # but the shell will have converted them, so we write carefully
+    cat > "$GCP_KEY_FILE" << GCPEOF
+{
+  "type": "service_account",
+  "project_id": "${GCP_PROJECT_ID}",
+  "private_key_id": "${GCP_PRIVATE_KEY_ID}",
+  "private_key": "${GCP_PRIVATE_KEY}",
+  "client_email": "${GCP_CLIENT_EMAIL}",
+  "client_id": "${GCP_CLIENT_ID}",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/${GCP_CLIENT_EMAIL}",
+  "universe_domain": "googleapis.com"
+}
+GCPEOF
+    
+    export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY_FILE"
+    echo "✅ GCP credentials written to $GCP_KEY_FILE"
+else
+    echo "ℹ️  GCP credentials not configured (GCP_CLIENT_EMAIL or GCP_PRIVATE_KEY not set)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DIRECTORY SETUP
