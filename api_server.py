@@ -672,6 +672,11 @@ def generate_video_internal(
         gen_kwargs["flow_shift"] = flow_shift
     
     try:
+        # Initialize cache attribute (required by any2video.py for step-skipping logic)
+        # Set to None to disable step-skipping cache (TeaCache/MagCache)
+        if hasattr(model_instance, 'model') and model_instance.model is not None:
+            model_instance.model.cache = None
+        
         result = model_instance.generate(**gen_kwargs)
         
         # Extract video tensor and audio
