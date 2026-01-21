@@ -196,7 +196,7 @@ def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,
         if (lang := meta.get('language')):
             cmd += ['-metadata:s:a:' + str(i), f'language={lang}']
 
-    cmd += ['-c:v', 'copy', '-c:a', 'copy', '-t', str(dur), output_video]
+    cmd += ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-t', str(dur), output_video]
 
     result = subprocess.run(cmd, capture_output=not verbose, text=True)
     if result.returncode != 0:

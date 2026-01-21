@@ -76,6 +76,9 @@ stringzilla==4.0.14
 vastai-sdk
 nltk
 
+# Cloud storage
+google-cloud-storage>=2.14.0
+
 
 
 # Optional / commented out

@@ -120,6 +120,91 @@ OUTPUT_DIR = Path(os.environ.get("WAN2GP_OUTPUT_DIR", "/workspace/outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# GCS CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "serverless_media_outputs")
+GCS_ENABLED = os.environ.get("GCS_ENABLED", "true").lower() == "true"
+GCS_PROJECT_ID = os.environ.get("GCS_PROJECT_ID", None)  # Optional, uses ADC if not set
+# URL expiration in days for signed URLs
+GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
+
+# GCS client (lazy initialized)
+_gcs_client = None
+
+def get_gcs_client():
+    """Get or create GCS client (uses Application Default Credentials)"""
+    global _gcs_client
+    if _gcs_client is None:
+        try:
+            from google.cloud import storage
+            _gcs_client = storage.Client(project=GCS_PROJECT_ID)
+            print(f"✅ GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+        except Exception as e:
+            print(f"⚠️ Failed to initialize GCS client: {e}")
+            return None
+    return _gcs_client
+
+def upload_to_gcs(local_path: str, gcs_filename: str = None, content_type: str = "video/mp4") -> tuple[bool, str, str]:
+    """
+    Upload a file to GCS and return a signed URL.
+    
+    Args:
+        local_path: Path to the local file
+        gcs_filename: Optional filename in GCS (defaults to local filename)
+        content_type: MIME type of the file
+        
+    Returns:
+        tuple: (success, gcs_uri or signed_url, error_message)
+    """
+    if not GCS_ENABLED:
+        return False, None, "GCS upload disabled"
+    
+    client = get_gcs_client()
+    if client is None:
+        return False, None, "GCS client not available"
+    
+    try:
+        from datetime import timedelta
+        
+        local_path = Path(local_path)
+        if not local_path.exists():
+            return False, None, f"File not found: {local_path}"
+        
+        # Use provided filename or extract from path
+        filename = gcs_filename or local_path.name
+        gcs_path = f"videos/{filename}"
+        
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(gcs_path)
+        
+        # Set chunk size for large files
+        blob.chunk_size = 8 * 1024 * 1024  # 8MB chunks
+        
+        # Upload with retry
+        print(f"📤 Uploading to GCS: gs://{GCS_BUCKET_NAME}/{gcs_path}")
+        blob.upload_from_filename(str(local_path), content_type=content_type, timeout=600)
+        
+        # Generate signed URL
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(days=GCS_URL_EXPIRATION_DAYS),
+            method="GET",
+            response_type=content_type,
+            response_disposition="inline",
+        )
+        
+        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{gcs_path}"
+        print(f"✅ Uploaded to GCS: {gcs_uri}")
+        
+        return True, signed_url, None
+        
+    except Exception as e:
+        error_msg = f"GCS upload failed: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False, None, error_msg
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MODEL-SPECIFIC CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -957,12 +1042,23 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         )
         
         filename = Path(output_path).name
-        base_url = str(http_request.base_url).rstrip("/")
-        full_url = f"{base_url}/download/{filename}"
+        job_id = filename.replace(".mp4", "")
+        
+        # Upload to GCS and get signed URL
+        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        
+        if gcs_success:
+            # Use the GCS signed URL
+            full_url = gcs_url
+        else:
+            # Fallback to local download URL
+            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
+            base_url = str(http_request.base_url).rstrip("/")
+            full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
-            job_id=filename.replace(".mp4", ""),
+            job_id=job_id,
             output_url=full_url,
             video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
@@ -1046,12 +1142,23 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         )
         
         filename = Path(output_path).name
-        base_url = str(http_request.base_url).rstrip("/")
-        full_url = f"{base_url}/download/{filename}"
+        job_id = filename.replace(".mp4", "")
+        
+        # Upload to GCS and get signed URL
+        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        
+        if gcs_success:
+            # Use the GCS signed URL
+            full_url = gcs_url
+        else:
+            # Fallback to local download URL
+            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
+            base_url = str(http_request.base_url).rstrip("/")
+            full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
-            job_id=filename.replace(".mp4", ""),
+            job_id=job_id,
             output_url=full_url,
             video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
