@@ -133,13 +133,35 @@ GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
 _gcs_client = None
 
 def get_gcs_client():
-    """Get or create GCS client (uses Application Default Credentials)"""
+    """Get or create GCS client.
+    
+    Supports credentials via:
+    1. GCP_CREDENTIALS_JSON env var (raw JSON string)
+    2. GOOGLE_APPLICATION_CREDENTIALS env var (file path)
+    3. Application Default Credentials (ADC)
+    """
     global _gcs_client
     if _gcs_client is None:
         try:
             from google.cloud import storage
-            _gcs_client = storage.Client(project=GCS_PROJECT_ID)
-            print(f"✅ GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+            from google.oauth2 import service_account
+            import json
+            
+            # Check for raw JSON credentials in env var
+            creds_json = os.environ.get("GCP_CREDENTIALS_JSON")
+            if creds_json:
+                try:
+                    creds_info = json.loads(creds_json)
+                    credentials = service_account.Credentials.from_service_account_info(creds_info)
+                    _gcs_client = storage.Client(project=GCS_PROJECT_ID or creds_info.get("project_id"), credentials=credentials)
+                    print(f"✅ GCS client initialized from GCP_CREDENTIALS_JSON for bucket: {GCS_BUCKET_NAME}")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Failed to parse GCP_CREDENTIALS_JSON: {e}")
+                    return None
+            else:
+                # Fall back to ADC (GOOGLE_APPLICATION_CREDENTIALS file or default)
+                _gcs_client = storage.Client(project=GCS_PROJECT_ID)
+                print(f"✅ GCS client initialized via ADC for bucket: {GCS_BUCKET_NAME}")
         except Exception as e:
             print(f"⚠️ Failed to initialize GCS client: {e}")
             return None
