@@ -132,37 +132,38 @@ GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
 # GCS client (lazy initialized)
 _gcs_client = None
 
-def _setup_gcp_credentials():
+def _get_gcp_credentials():
     """
-    Reconstruct GCP credentials from individual environment variables.
-    This allows passing credentials via Vast.ai env vars without a JSON file.
+    Build GCP credentials from environment variables (in-memory, no file written to disk).
     
     Required env vars:
-        GCP_PROJECT_ID, GCP_PRIVATE_KEY_ID, GCP_PRIVATE_KEY_B64,
-        GCP_CLIENT_EMAIL, GCP_CLIENT_ID
+        GCP_PROJECT_ID: Your GCP project ID
+        GCP_CLIENT_EMAIL: Service account email (xxx@project.iam.gserviceaccount.com)
+        GCP_PRIVATE_KEY_B64: Base64-encoded private key
+    
+    Optional env vars:
+        GCP_PRIVATE_KEY_ID: Private key ID (can be empty)
+        GCP_CLIENT_ID: Client ID (can be empty)
+    
+    Returns:
+        google.oauth2.service_account.Credentials or None
     """
-    import json
     import base64
-    import tempfile
     
     client_email = os.environ.get("GCP_CLIENT_EMAIL")
     private_key_b64 = os.environ.get("GCP_PRIVATE_KEY_B64")
     
-    # Skip if already configured or env vars not set
-    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        print("✅ GCP credentials already configured via GOOGLE_APPLICATION_CREDENTIALS")
-        return True
-    
     if not client_email or not private_key_b64:
-        print("ℹ️  GCP credentials not configured (GCP_CLIENT_EMAIL or GCP_PRIVATE_KEY_B64 not set)")
-        return False
+        return None
     
     try:
+        from google.oauth2 import service_account
+        
         # Decode the base64-encoded private key
         private_key = base64.b64decode(private_key_b64).decode('utf-8')
         
-        # Build the credentials JSON
-        credentials = {
+        # Build the credentials dict (in memory - never written to disk)
+        credentials_info = {
             "type": "service_account",
             "project_id": os.environ.get("GCP_PROJECT_ID", ""),
             "private_key_id": os.environ.get("GCP_PRIVATE_KEY_ID", ""),
@@ -176,30 +177,37 @@ def _setup_gcp_credentials():
             "universe_domain": "googleapis.com"
         }
         
-        # Write to a temp file
-        fd, key_path = tempfile.mkstemp(suffix='.json', prefix='gcp_key_')
-        with os.fdopen(fd, 'w') as f:
-            json.dump(credentials, f)
-        
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-        print(f"✅ GCP credentials reconstructed from env vars -> {key_path}")
-        return True
+        # Create credentials object directly from dict (no file needed)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        print("✅ GCP credentials loaded from env vars (in-memory, no file written)")
+        return credentials
         
     except Exception as e:
-        print(f"⚠️ Failed to reconstruct GCP credentials: {e}")
-        return False
+        print(f"⚠️ Failed to build GCP credentials: {e}")
+        return None
 
 def get_gcs_client():
-    """Get or create GCS client (uses Application Default Credentials)"""
+    """Get or create GCS client"""
     global _gcs_client
     if _gcs_client is None:
-        # Try to set up credentials from env vars first
-        _setup_gcp_credentials()
-        
         try:
             from google.cloud import storage
-            _gcs_client = storage.Client(project=GCS_PROJECT_ID)
-            print(f"✅ GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+            
+            # Try env var credentials first (in-memory, no file written)
+            credentials = _get_gcp_credentials()
+            
+            if credentials:
+                _gcs_client = storage.Client(project=GCS_PROJECT_ID, credentials=credentials)
+                print(f"✅ GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+            elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                # Fall back to file-based credentials
+                _gcs_client = storage.Client(project=GCS_PROJECT_ID)
+                print(f"✅ GCS client initialized from GOOGLE_APPLICATION_CREDENTIALS")
+            else:
+                # Try Application Default Credentials
+                _gcs_client = storage.Client(project=GCS_PROJECT_ID)
+                print(f"✅ GCS client initialized with ADC")
+                
         except Exception as e:
             print(f"⚠️ Failed to initialize GCS client: {e}")
             return None
