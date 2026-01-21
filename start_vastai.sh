@@ -17,12 +17,9 @@
 #   WAN2GP_PROFILE: MMGP profile 1-6 (default: 3)
 #   MODEL_SERVER_PORT: Backend API port (default: 8000)
 #
-# GCP Credentials (for uploading videos to Cloud Storage):
-#   GCP_PROJECT_ID: Your GCP project ID
-#   GCP_PRIVATE_KEY_ID: From service account JSON
-#   GCP_PRIVATE_KEY_B64: Base64-encoded private key (run: cat key.json | jq -r '.private_key' | base64 -w0)
-#   GCP_CLIENT_EMAIL: Service account email
-#   GCP_CLIENT_ID: Service account client ID
+# GCP Credentials (for uploading videos to Cloud Storage) - handled by api_server.py:
+#   GCP_PROJECT_ID, GCP_PRIVATE_KEY_ID, GCP_PRIVATE_KEY_B64, GCP_CLIENT_EMAIL, GCP_CLIENT_ID
+#   See api_server.py for details on setting these up.
 #
 
 set -e
@@ -58,45 +55,6 @@ export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
 export WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 export MODEL_LOG="$WAN2GP_LOG_FILE"  # For Vast's start_server.sh
 LOG_DIR=$(dirname "$WAN2GP_LOG_FILE")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GCP CREDENTIALS SETUP (from individual env vars)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# If GCP_CLIENT_EMAIL is set, reconstruct the service account JSON
-if [ -n "$GCP_CLIENT_EMAIL" ] && [ -n "$GCP_PRIVATE_KEY_B64" ]; then
-    echo "🔑 Reconstructing GCP credentials from environment variables..."
-    
-    GCP_KEY_FILE="/workspace/gcp-key.json"
-    
-    # Decode the base64-encoded private key
-    DECODED_KEY=$(echo "$GCP_PRIVATE_KEY_B64" | base64 -d)
-    
-    # Write the JSON file using Python to handle escaping properly
-    python3 << PYEOF
-import json
-key_data = {
-    "type": "service_account",
-    "project_id": "${GCP_PROJECT_ID}",
-    "private_key_id": "${GCP_PRIVATE_KEY_ID}",
-    "private_key": """${DECODED_KEY}""",
-    "client_email": "${GCP_CLIENT_EMAIL}",
-    "client_id": "${GCP_CLIENT_ID}",
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/${GCP_CLIENT_EMAIL}",
-    "universe_domain": "googleapis.com"
-}
-with open("${GCP_KEY_FILE}", "w") as f:
-    json.dump(key_data, f, indent=2)
-print("✅ GCP credentials written to ${GCP_KEY_FILE}")
-PYEOF
-    
-    export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY_FILE"
-else
-    echo "ℹ️  GCP credentials not configured (GCP_CLIENT_EMAIL or GCP_PRIVATE_KEY_B64 not set)"
-fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DIRECTORY SETUP

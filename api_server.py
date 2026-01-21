@@ -125,17 +125,77 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "serverless_media_outputs")
 GCS_ENABLED = os.environ.get("GCS_ENABLED", "true").lower() == "true"
-GCS_PROJECT_ID = os.environ.get("GCS_PROJECT_ID", None)  # Optional, uses ADC if not set
+GCS_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", None)
 # URL expiration in days for signed URLs
 GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
 
 # GCS client (lazy initialized)
 _gcs_client = None
 
+def _setup_gcp_credentials():
+    """
+    Reconstruct GCP credentials from individual environment variables.
+    This allows passing credentials via Vast.ai env vars without a JSON file.
+    
+    Required env vars:
+        GCP_PROJECT_ID, GCP_PRIVATE_KEY_ID, GCP_PRIVATE_KEY_B64,
+        GCP_CLIENT_EMAIL, GCP_CLIENT_ID
+    """
+    import json
+    import base64
+    import tempfile
+    
+    client_email = os.environ.get("GCP_CLIENT_EMAIL")
+    private_key_b64 = os.environ.get("GCP_PRIVATE_KEY_B64")
+    
+    # Skip if already configured or env vars not set
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        print("✅ GCP credentials already configured via GOOGLE_APPLICATION_CREDENTIALS")
+        return True
+    
+    if not client_email or not private_key_b64:
+        print("ℹ️  GCP credentials not configured (GCP_CLIENT_EMAIL or GCP_PRIVATE_KEY_B64 not set)")
+        return False
+    
+    try:
+        # Decode the base64-encoded private key
+        private_key = base64.b64decode(private_key_b64).decode('utf-8')
+        
+        # Build the credentials JSON
+        credentials = {
+            "type": "service_account",
+            "project_id": os.environ.get("GCP_PROJECT_ID", ""),
+            "private_key_id": os.environ.get("GCP_PRIVATE_KEY_ID", ""),
+            "private_key": private_key,
+            "client_email": client_email,
+            "client_id": os.environ.get("GCP_CLIENT_ID", ""),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{client_email}",
+            "universe_domain": "googleapis.com"
+        }
+        
+        # Write to a temp file
+        fd, key_path = tempfile.mkstemp(suffix='.json', prefix='gcp_key_')
+        with os.fdopen(fd, 'w') as f:
+            json.dump(credentials, f)
+        
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+        print(f"✅ GCP credentials reconstructed from env vars -> {key_path}")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ Failed to reconstruct GCP credentials: {e}")
+        return False
+
 def get_gcs_client():
     """Get or create GCS client (uses Application Default Credentials)"""
     global _gcs_client
     if _gcs_client is None:
+        # Try to set up credentials from env vars first
+        _setup_gcp_credentials()
+        
         try:
             from google.cloud import storage
             _gcs_client = storage.Client(project=GCS_PROJECT_ID)
