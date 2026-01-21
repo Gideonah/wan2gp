@@ -17,7 +17,7 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 #
 # Note: Including 8.9 or 9.0 may cause compilation issues on some setups
 # Default includes 8.0 and 8.6 for broad Ampere compatibility
-ARG CUDA_ARCHITECTURES="8.0;8.6"
+ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -39,8 +39,10 @@ RUN pip install --upgrade pip setuptools wheel
 RUN pip install -r requirements.txt
 
 # Install PyTorch with CUDA support
-RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.6.0+cu124 torchvision==0.21.0+cu124
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
+    pip install fastapi uvicorn python-multipart httpx+cu124 torchvision==0.21.0+cu124
 
 # Install SageAttention from git (patch GPU detection)
 ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
@@ -80,13 +82,38 @@ RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && 
     python3 /tmp/patch_setup.py && \
     pip install --no-build-isolation .
 
-RUN useradd -u 1000 -ms /bin/bash user
 
-RUN chown -R user:user /workspace
+COPY . /workspace/
 
-RUN mkdir /home/user/.cache && \
-    chown -R user:user /home/user/.cache
+# Create directories
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 
-COPY entrypoint.sh /workspace/entrypoint.sh
+# Make scripts executable
+RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
-ENTRYPOINT ["/workspace/entrypoint.sh"]
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Runtime Configuration
+    # ─────────────────────────────────────────────────────────────────────────────
+    
+    # HuggingFace cache (models downloaded at runtime)
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# Model configuration (LTX-2 Distilled)
+ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+# Backend API server port (internal)
+ENV MODEL_SERVER_PORT="8000"
+
+# Log file for PyWorker monitoring
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
+
+# Vast.ai will expose port 80 for the PyWorker
+EXPOSE 80
+
+# Healthcheck via the PyWorker proxy
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:80/health || exit 1
+
+CMD ["/workspace/start_pyworker.sh"]

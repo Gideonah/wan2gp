@@ -19,7 +19,7 @@ Environment Variables:
 import os
 import random
 
-from vastai import (
+from vastai.serverless.server import (
     Worker,
     WorkerConfig,
     HandlerConfig,

@@ -4,7 +4,7 @@
 # This Dockerfile creates an image optimized for Vast.ai deployment:
 #   - LTX-2 Distilled model for fast image-to-video generation
 #   - Models downloaded at runtime (smaller image)
-#   - PyWorker integration for Vast's serverless routing
+#   - STANDARD Vast.ai PyWorker integration via start_server.sh
 #   - Log-based readiness detection
 #   - Benchmarking support for autoscaling
 #
@@ -15,7 +15,10 @@
 # VAST.AI TEMPLATE SETTINGS:
 #   Image: YOUR_REGISTRY/ltx2-vastai:latest
 #   Docker Options: --gpus all
-#   On-Start Script: /app/start_pyworker.sh
+#   On-Start Script: /workspace/start_vastai.sh
+#   Environment Variables:
+#     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
+#     PYWORKER_REF: main (optional, defaults to main)
 #
 # NOTE: First startup will download model weights (~20-25GB for LTX-2 distilled).
 #       Mount a persistent volume to /workspace/.cache for faster restarts.
@@ -45,16 +48,27 @@ WORKDIR /workspace
 
 COPY requirements.txt .
 
-# Install all Python dependencies in one layer with cache cleanup
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu124 \
+RUN pip install --upgrade pip setuptools wheel
+
+# Install requirements if exists
+RUN pip install -r requirements.txt
+
+# Install PyTorch with CUDA support
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
         torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
-    pip install --no-cache-dir fastapi uvicorn python-multipart httpx && \
-    python3 -c "import nltk; nltk.download('words', quiet=True)" && \
-    rm -rf /root/.cache/pip /tmp/* && \
-    find /usr/local -name "*.pyc" -delete && \
-    find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    pip install fastapi uvicorn python-multipart httpx+cu124 torchvision==0.21.0+cu124
+
+# # Install all Python dependencies in one layer with cache cleanup
+# RUN pip install --upgrade pip setuptools wheel && \
+#     pip install -r requirements.txt && \
+#     pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+#         torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
+#     pip install fastapi uvicorn python-multipart httpx && \
+#     python3 -c "import nltk; nltk.download('words', quiet=True)" && \
+#     rm -rf /root/.cache/pip /tmp/* && \
+#     find /usr/local -name "*.pyc" -delete && \
+#     find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SageAttention (compile for target GPU architectures)
@@ -93,7 +107,7 @@ EOF
 RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
     cd /tmp/sageattention && \
     python3 /tmp/patch_setup.py && \
-    pip install --no-cache-dir --no-build-isolation . && \
+    pip install --no-build-isolation . && \
     rm -rf /tmp/sageattention /tmp/patch_setup.py /root/.cache/* || \
     echo "⚠️  SageAttention skipped (no CUDA during build)"
 
@@ -101,18 +115,13 @@ RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageatt
 # Application Code
 # ─────────────────────────────────────────────────────────────────────────────
 
-# IMPORTANT: Copy to /app instead of /workspace
-# VastAI mounts a volume over /workspace which would hide our code!
-COPY . /app/
+COPY . /workspace/
 
-# Create directories (outputs can be in mounted /workspace for persistence)
+# Create directories
 RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 
 # Make scripts executable
-RUN chmod +x /app/start_pyworker.sh /app/entrypoint_api.sh 2>/dev/null || true
-
-# Symlink scripts to expected locations for VastAI
-RUN ln -sf /app/start_pyworker.sh /usr/local/bin/start_pyworker.sh
+RUN chmod +x /workspace/start_vastai.sh /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
@@ -132,6 +141,11 @@ ENV MODEL_SERVER_PORT="8000"
 # Log file for PyWorker monitoring
 ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 
+# PyWorker repo (set this in your Vast template, or override here)
+# Points to the directory containing worker.py and requirements.txt
+# ENV PYWORKER_REPO="https://github.com/YOUR_USER/YOUR_REPO"
+# ENV PYWORKER_REF="main"
+
 # Vast.ai will expose port 80 for the PyWorker
 EXPOSE 80
 
@@ -139,9 +153,8 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
     CMD curl -f http://localhost:80/health || exit 1
 
-# Set working directory to /app where our code lives
-WORKDIR /app
-
-# Start the PyWorker (which starts the backend API server)
-CMD ["/app/start_pyworker.sh"]
+# Start using standard Vast.ai approach:
+# 1. Starts backend API server
+# 2. Calls wget start_server.sh which installs vastai-sdk and runs worker.py from PYWORKER_REPO
+CMD ["/workspace/start_vastai.sh"]
 
