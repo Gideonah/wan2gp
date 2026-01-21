@@ -650,6 +650,13 @@ def generate_video_internal(
         "model_switch_step2": num_inference_steps,
     }
     
+    # Progress callback (required by Wan models)
+    def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
+        if step >= 0:
+            steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
+            extra = f" {denoising_extra}" if denoising_extra else ""
+            print(f"   Step {step + 1}/{steps_display}{extra}")
+    
     # Build generation kwargs
     gen_kwargs = {
         "input_prompt": prompt,
@@ -665,6 +672,7 @@ def generate_video_internal(
         "fps": float(fps),
         "VAE_tile_size": 0,
         "loras_slists": loras_slists,
+        "callback": video_progress_callback,
     }
     
     # Add flow_shift for Wan2.2
