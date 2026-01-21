@@ -97,8 +97,8 @@ echo "   Port:       $MODEL_SERVER_PORT" | tee -a "$WAN2GP_LOG_FILE"
 echo "   Output Dir: $WAN2GP_OUTPUT_DIR" | tee -a "$WAN2GP_LOG_FILE"
 echo "" | tee -a "$WAN2GP_LOG_FILE"
 
-# Change to workspace directory
-cd /workspace
+# Change to app directory (code lives here, not /workspace which is a volume mount)
+cd /app
 
 # Start the API server in background, with all output going to log file
 python3 api_server.py \

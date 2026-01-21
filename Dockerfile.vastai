@@ -15,7 +15,7 @@
 # VAST.AI TEMPLATE SETTINGS:
 #   Image: YOUR_REGISTRY/ltx2-vastai:latest
 #   Docker Options: --gpus all
-#   On-Start Script: /workspace/start_pyworker.sh
+#   On-Start Script: /app/start_pyworker.sh
 #
 # NOTE: First startup will download model weights (~20-25GB for LTX-2 distilled).
 #       Mount a persistent volume to /workspace/.cache for faster restarts.
@@ -101,13 +101,18 @@ RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageatt
 # Application Code
 # ─────────────────────────────────────────────────────────────────────────────
 
-COPY . /workspace/
+# IMPORTANT: Copy to /app instead of /workspace
+# VastAI mounts a volume over /workspace which would hide our code!
+COPY . /app/
 
-# Create directories
+# Create directories (outputs can be in mounted /workspace for persistence)
 RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 
 # Make scripts executable
-RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
+RUN chmod +x /app/start_pyworker.sh /app/entrypoint_api.sh 2>/dev/null || true
+
+# Symlink scripts to expected locations for VastAI
+RUN ln -sf /app/start_pyworker.sh /usr/local/bin/start_pyworker.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
@@ -134,6 +139,9 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
     CMD curl -f http://localhost:80/health || exit 1
 
+# Set working directory to /app where our code lives
+WORKDIR /app
+
 # Start the PyWorker (which starts the backend API server)
-CMD ["/workspace/start_pyworker.sh"]
+CMD ["/app/start_pyworker.sh"]
 
