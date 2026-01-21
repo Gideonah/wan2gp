@@ -118,7 +118,7 @@ ENV HF_HOME=/workspace/.cache/huggingface
 
 # Model configuration (LTX-2 Distilled)
 ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
-ENV WAN2GP_PROFILE="5"
+ENV WAN2GP_PROFILE="3"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 
 # Backend API server port (internal)

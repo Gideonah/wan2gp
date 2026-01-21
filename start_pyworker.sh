@@ -40,7 +40,7 @@ export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
 
 # API configuration (default to LTX-2 Distilled)
 export WAN2GP_MODEL_TYPE=${WAN2GP_MODEL_TYPE:-"ltx2_distilled"}
-export WAN2GP_PROFILE=${WAN2GP_PROFILE:-"5"}
+export WAN2GP_PROFILE=${WAN2GP_PROFILE:-"3"}
 export MODEL_SERVER_PORT=${MODEL_SERVER_PORT:-"8000"}
 export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
 
