@@ -758,6 +758,11 @@ def generate_image_internal(
     return str(output_path), generation_time, metadata
 
 
+def convert_pil_image_to_tensor(image: Image.Image) -> torch.Tensor:
+    """Convert PIL Image to tensor in range [-1, 1] with shape (C, H, W)"""
+    return torch.from_numpy(np.array(image).astype(np.float32)).div_(127.5).sub_(1.).movedim(-1, 0)
+
+
 def generate_video_internal(
     prompt: str,
     image_start: Optional[Image.Image] = None,
@@ -787,6 +792,8 @@ def generate_video_internal(
     print(f"🎬 Generating video: {prompt[:50]}...")
     print(f"   Resolution: {width}x{height}, Frames: {num_frames}, Steps: {num_inference_steps}")
     print(f"   Duration: {frames_to_duration(num_frames, fps)}s @ {fps}fps")
+    if image_start is not None:
+        print(f"   Input image: {image_start.size[0]}x{image_start.size[1]}")
     
     start_time = time.time()
     
@@ -813,11 +820,22 @@ def generate_video_internal(
             extra = f" {denoising_extra}" if denoising_extra else ""
             print(f"   Step {step + 1}/{steps_display}{extra}")
     
+    # Convert image_start to tensor format for Wan2.2 i2v models
+    # Wan2.2 i2v models expect input_video as a tensor with shape (C, T, H, W)
+    image_start_tensor = None
+    input_video_tensor = None
+    if image_start is not None and current_model_family == "wan22":
+        # For Wan2.2 i2v: convert PIL image to tensor and pass as input_video
+        image_start_tensor = convert_pil_image_to_tensor(image_start)
+        # Add time dimension: (C, H, W) -> (C, 1, H, W)
+        input_video_tensor = image_start_tensor.unsqueeze(1)
+        print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
+    
     # Build generation kwargs
     gen_kwargs = {
         "input_prompt": prompt,
         "n_prompt": negative_prompt if negative_prompt else None,
-        "image_start": image_start,
+        "image_start": image_start_tensor,  # Tensor for Wan2.2, PIL for LTX2
         "image_end": None,
         "width": width,
         "height": height,
@@ -830,6 +848,13 @@ def generate_video_internal(
         "loras_slists": loras_slists,
         "callback": video_progress_callback,
     }
+    
+    # For Wan2.2 i2v models, pass the image as input_video (required for i2v_class flow)
+    if input_video_tensor is not None:
+        gen_kwargs["input_video"] = input_video_tensor
+    elif image_start is not None and current_model_family != "wan22":
+        # For LTX2 and other models, pass PIL image as image_start
+        gen_kwargs["image_start"] = image_start
     
     # Add flow_shift for Wan2.2
     if flow_shift is not None:
