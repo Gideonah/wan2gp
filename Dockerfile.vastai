@@ -2,7 +2,7 @@
 # LTX-2 Distilled Video Generation for Vast.ai Serverless
 # 
 # This Dockerfile creates an image optimized for Vast.ai deployment:
-#   - LTX-2 Distilled model BAKED IN (faster startup, ~25GB image)
+#   - Models downloaded at RUNTIME (smaller image, ~8GB)
 #   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
 #   - No LoRAs downloaded
 #   - STANDARD Vast.ai PyWorker integration via start_server.sh
@@ -18,6 +18,9 @@
 #   Environment Variables:
 #     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
 #     PYWORKER_REF: main (optional, defaults to main)
+#
+# NOTE: First startup will download model weights (~15GB for LTX-2 distilled FP8).
+#       Mount a persistent volume to /workspace/ckpts for faster restarts.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -110,22 +113,11 @@ RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 RUN chmod +x /workspace/start_vastai.sh /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BAKE IN LTX-2 DISTILLED MODEL WEIGHTS (faster startup)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Set HF cache location
-ENV HF_HOME=/workspace/.cache/huggingface
-
-# Download LTX-2 Distilled model weights during build
-# This includes: transformer, VAE, audio VAE, vocoder, text encoder (Gemma), etc.
-# Skips: LoRAs, shared preprocessing models (SAM, DWPose, depth, etc.)
-# IMPORTANT: --output-dir /workspace/ckpts puts files where files_locator can find them
-RUN python3 download_ltx2_distilled.py --fp8 --output-dir /workspace/ckpts && \
-    echo "✅ LTX-2 Distilled model weights baked in!"
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Runtime Configuration
 # ─────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace cache location
+ENV HF_HOME=/workspace/.cache/huggingface
 
 # Model configuration (LTX-2 Distilled)
 ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
@@ -146,10 +138,10 @@ ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 EXPOSE 80
 
 # Healthcheck via the PyWorker proxy
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
     CMD curl -f http://localhost:80/health || exit 1
 
 # Start using standard Vast.ai approach:
-# 1. Starts backend API server
+# 1. Starts backend API server (downloads models on first run)
 # 2. Calls wget start_server.sh which installs vastai-sdk and runs worker.py from PYWORKER_REPO
 CMD ["/workspace/start_vastai.sh"]

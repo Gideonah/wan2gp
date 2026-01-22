@@ -2,14 +2,14 @@
 #
 # Build Wan2GP Docker Image for Vast.ai Serverless
 #
-# This script builds and optionally pushes the Vast.ai-ready image
-# with BAKED IN model weights and PyWorker integration.
+# This script builds and optionally pushes the Vast.ai-ready image.
+# Models are downloaded at RUNTIME (not baked in).
 #
 # Features:
-#   - LTX-2 Distilled model weights BAKED IN (~25GB image)
+#   - Smaller image (~8GB without model weights)
 #   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
 #   - No LoRAs downloaded
-#   - Faster cold starts on Vast.ai
+#   - Models downloaded on first startup (~15GB)
 #
 # Usage:
 #   ./build_vastai_image.sh YOUR_DOCKERHUB_USERNAME
@@ -32,9 +32,9 @@ echo "════════════════════════�
 echo ""
 echo "  Image: ${FULL_IMAGE}"
 echo ""
-echo "  ⚡ Model weights BAKED IN during build (~25GB image)"
+echo "  📦 Models downloaded at RUNTIME (smaller image)"
 echo "  ⚡ SKIP shared preprocessing models (SAM, DWPose, depth, etc.)"
-echo "  ⚡ No LoRAs downloaded"
+echo "  ❌ No LoRAs downloaded"
 echo ""
 
 # Check if we're in the right directory
@@ -48,14 +48,8 @@ if [ ! -f "Dockerfile.vastai" ]; then
     exit 1
 fi
 
-if [ ! -f "download_ltx2_distilled.py" ]; then
-    echo "❌ Error: download_ltx2_distilled.py not found"
-    exit 1
-fi
-
 # Step 1: Build Docker image
 echo "🐳 Step 1: Building Docker image..."
-echo "   (Model weights will be downloaded during build - this takes ~30 mins)"
 echo ""
 
 docker build -f Dockerfile.vastai -t ${FULL_IMAGE} .
@@ -91,10 +85,9 @@ echo "  ENVIRONMENT VARIABLES (set in Vast template):"
 echo "    PYWORKER_REPO:  URL to your pyworker repo"
 echo "    GCP_CLIENT_EMAIL, GCP_PRIVATE_KEY_B64, GCP_PROJECT_ID (for GCS uploads)"
 echo ""
-echo "  WHAT'S INCLUDED:"
-echo "    ✅ LTX-2 Distilled FP8 transformer (~10GB)"
-echo "    ✅ Gemma text encoder (~2GB)"
-echo "    ✅ VAE, Audio VAE, Vocoder, Upscaler"
+echo "  FIRST STARTUP:"
+echo "    ⏳ Will download LTX-2 Distilled model (~15GB)"
+echo "    💡 Mount persistent volume to /workspace/ckpts for faster restarts"
 echo ""
 echo "  WHAT'S EXCLUDED (faster startup):"
 echo "    ❌ SAM (segmentation)"
