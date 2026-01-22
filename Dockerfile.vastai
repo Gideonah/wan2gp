@@ -2,11 +2,10 @@
 # LTX-2 Distilled Video Generation for Vast.ai Serverless
 # 
 # This Dockerfile creates an image optimized for Vast.ai deployment:
-#   - LTX-2 Distilled model for fast image-to-video generation
-#   - Models downloaded at runtime (smaller image)
+#   - LTX-2 Distilled model BAKED IN (faster startup, ~25GB image)
+#   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
+#   - No LoRAs downloaded
 #   - STANDARD Vast.ai PyWorker integration via start_server.sh
-#   - Log-based readiness detection
-#   - Benchmarking support for autoscaling
 #
 # BUILD PROCESS (run on a GPU machine for SageAttention):
 #   docker build -f Dockerfile.vastai -t YOUR_REGISTRY/ltx2-vastai:latest .
@@ -19,9 +18,6 @@
 #   Environment Variables:
 #     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
 #     PYWORKER_REF: main (optional, defaults to main)
-#
-# NOTE: First startup will download model weights (~20-25GB for LTX-2 distilled).
-#       Mount a persistent volume to /workspace/.cache for faster restarts.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -58,18 +54,7 @@ RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
 RUN pip install -r requirements.txt
 
 # Install additional API dependencies
-RUN pip install fastapi uvicorn python-multipart httpx
-
-# # Install all Python dependencies in one layer with cache cleanup
-# RUN pip install --upgrade pip setuptools wheel && \
-#     pip install -r requirements.txt && \
-#     pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-#         torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
-#     pip install fastapi uvicorn python-multipart httpx && \
-#     python3 -c "import nltk; nltk.download('words', quiet=True)" && \
-#     rm -rf /root/.cache/pip /tmp/* && \
-#     find /usr/local -name "*.pyc" -delete && \
-#     find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN pip install fastapi uvicorn python-multipart httpx google-cloud-storage
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SageAttention (compile for target GPU architectures)
@@ -125,16 +110,31 @@ RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
 RUN chmod +x /workspace/start_vastai.sh /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Runtime Configuration
+# BAKE IN LTX-2 DISTILLED MODEL WEIGHTS (faster startup)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# HuggingFace cache (models downloaded at runtime)
+# Set HF cache location
 ENV HF_HOME=/workspace/.cache/huggingface
+
+# Download LTX-2 Distilled model weights during build
+# This includes: transformer, VAE, audio VAE, vocoder, text encoder (Gemma), etc.
+# Skips: LoRAs, shared preprocessing models (SAM, DWPose, depth, etc.)
+# IMPORTANT: --output-dir /workspace/ckpts puts files where files_locator can find them
+RUN python3 download_ltx2_distilled.py --fp8 --output-dir /workspace/ckpts && \
+    echo "✅ LTX-2 Distilled model weights baked in!"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Model configuration (LTX-2 Distilled)
 ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
 ENV WAN2GP_PROFILE="3"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+# CRITICAL: Skip shared preprocessing model downloads (SAM, DWPose, depth, etc.)
+# The API server only uses direct I2V - no need for these preprocessing models
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
 
 # Backend API server port (internal)
 ENV MODEL_SERVER_PORT="8000"
@@ -142,20 +142,14 @@ ENV MODEL_SERVER_PORT="8000"
 # Log file for PyWorker monitoring
 ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 
-# PyWorker repo (set this in your Vast template, or override here)
-# Points to the directory containing worker.py and requirements.txt
-# ENV PYWORKER_REPO="https://github.com/YOUR_USER/YOUR_REPO"
-# ENV PYWORKER_REF="main"
-
 # Vast.ai will expose port 80 for the PyWorker
 EXPOSE 80
 
 # Healthcheck via the PyWorker proxy
-HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s \
     CMD curl -f http://localhost:80/health || exit 1
 
 # Start using standard Vast.ai approach:
 # 1. Starts backend API server
 # 2. Calls wget start_server.sh which installs vastai-sdk and runs worker.py from PYWORKER_REPO
 CMD ["/workspace/start_vastai.sh"]
-

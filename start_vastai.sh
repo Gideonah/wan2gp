@@ -51,6 +51,10 @@ export WAN2GP_PROFILE=${WAN2GP_PROFILE:-"3"}
 export MODEL_SERVER_PORT=${MODEL_SERVER_PORT:-"8000"}
 export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
 
+# CRITICAL: Skip shared preprocessing model downloads (SAM, DWPose, depth, etc.)
+# These are not needed for serverless I2V API - models are baked into the image
+export WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+
 # Log file location (PyWorker monitors this)
 export WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
 export MODEL_LOG="$WAN2GP_LOG_FILE"  # For Vast's start_server.sh

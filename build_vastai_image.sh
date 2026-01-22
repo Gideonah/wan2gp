@@ -3,7 +3,13 @@
 # Build Wan2GP Docker Image for Vast.ai Serverless
 #
 # This script builds and optionally pushes the Vast.ai-ready image
-# with baked model weights and PyWorker integration.
+# with BAKED IN model weights and PyWorker integration.
+#
+# Features:
+#   - LTX-2 Distilled model weights BAKED IN (~25GB image)
+#   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
+#   - No LoRAs downloaded
+#   - Faster cold starts on Vast.ai
 #
 # Usage:
 #   ./build_vastai_image.sh YOUR_DOCKERHUB_USERNAME
@@ -26,6 +32,10 @@ echo "════════════════════════�
 echo ""
 echo "  Image: ${FULL_IMAGE}"
 echo ""
+echo "  ⚡ Model weights BAKED IN during build (~25GB image)"
+echo "  ⚡ SKIP shared preprocessing models (SAM, DWPose, depth, etc.)"
+echo "  ⚡ No LoRAs downloaded"
+echo ""
 
 # Check if we're in the right directory
 if [ ! -f "api_server.py" ]; then
@@ -38,14 +48,14 @@ if [ ! -f "Dockerfile.vastai" ]; then
     exit 1
 fi
 
-if [ ! -f "worker.py" ]; then
-    echo "❌ Error: worker.py not found"
+if [ ! -f "download_ltx2_distilled.py" ]; then
+    echo "❌ Error: download_ltx2_distilled.py not found"
     exit 1
 fi
 
 # Step 1: Build Docker image
 echo "🐳 Step 1: Building Docker image..."
-echo "   (Model weights will be downloaded during build - this takes a while)"
+echo "   (Model weights will be downloaded during build - this takes ~30 mins)"
 echo ""
 
 docker build -f Dockerfile.vastai -t ${FULL_IMAGE} .
@@ -75,15 +85,25 @@ echo ""
 echo "  VAST.AI TEMPLATE SETTINGS:"
 echo "    Image:          ${FULL_IMAGE}"
 echo "    Docker Options: --gpus all"
-echo "    On-Start Script: /workspace/start_pyworker.sh"
+echo "    On-Start Script: /workspace/start_vastai.sh"
 echo ""
-echo "  ENVIRONMENT VARIABLES (optional):"
-echo "    WAN2GP_MODEL_TYPE: t2v, i2v, vace_14B (default: t2v)"
-echo "    WAN2GP_PROFILE:    1-6 (default: 5)"
+echo "  ENVIRONMENT VARIABLES (set in Vast template):"
+echo "    PYWORKER_REPO:  URL to your pyworker repo"
+echo "    GCP_CLIENT_EMAIL, GCP_PRIVATE_KEY_B64, GCP_PROJECT_ID (for GCS uploads)"
+echo ""
+echo "  WHAT'S INCLUDED:"
+echo "    ✅ LTX-2 Distilled FP8 transformer (~10GB)"
+echo "    ✅ Gemma text encoder (~2GB)"
+echo "    ✅ VAE, Audio VAE, Vocoder, Upscaler"
+echo ""
+echo "  WHAT'S EXCLUDED (faster startup):"
+echo "    ❌ SAM (segmentation)"
+echo "    ❌ DWPose (pose estimation)"
+echo "    ❌ Depth Anything V2"
+echo "    ❌ Wav2Vec, Roformer (audio preprocessing)"
+echo "    ❌ LoRAs"
 echo ""
 echo "  ENDPOINTS:"
-echo "    POST /generate/t2v  - Text-to-Video generation"
-echo "    POST /generate/i2v  - Image-to-Video generation"
-echo "    GET  /health        - Health check"
+echo "    POST /generate/ltx2/i2v  - Image-to-Video generation"
+echo "    GET  /health             - Health check"
 echo "═══════════════════════════════════════════════════════════════════"
-

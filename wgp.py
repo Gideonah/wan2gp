@@ -2942,6 +2942,12 @@ def download_file(url,filename):
         urlretrieve(url,filename, create_progress_hook(filename))
 
 download_shared_done = False
+# Check if we should skip shared preprocessing model downloads (for serverless API mode)
+_skip_shared_downloads = os.environ.get("WAN2GP_SKIP_SHARED_DOWNLOADS", "").strip().lower() in ("1", "true", "yes")
+if _skip_shared_downloads:
+    download_shared_done = True
+    print("⚡ WAN2GP_SKIP_SHARED_DOWNLOADS enabled: skipping SAM, DWPose, depth, and other preprocessing model downloads")
+
 def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None):
     def computeList(filename):
         if filename == None:
@@ -2951,7 +2957,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
         return [filename]        
 
 
-    if file_type == 0:
+    if file_type == 0 and not download_shared_done:
         shared_def = {
             "repoId" : "DeepBeepMeep/Wan2.1",
             "sourceFolderList" : [ "pose", "scribble", "flow", "depth", "mask", "wav2vec", "chinese-wav2vec2-base", "roformer", "pyannote", "det_align", "" ],

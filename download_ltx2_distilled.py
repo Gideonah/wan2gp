@@ -12,6 +12,9 @@ Total download size: ~20-25GB
 
 Usage:
     python download_ltx2_distilled.py [--fp8] [--output-dir /path/to/ckpts]
+    
+For Docker builds (vastai), use:
+    python download_ltx2_distilled.py --fp8 --output-dir /workspace/ckpts
 """
 
 import os
@@ -36,8 +39,8 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=None,
-        help="Output directory (default: HF cache)",
+        default=os.environ.get("WAN2GP_CKPTS_DIR", None),
+        help="Output directory (default: HF cache, or WAN2GP_CKPTS_DIR env var)",
     )
     parser.add_argument(
         "--no-gemma",
