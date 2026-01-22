@@ -339,6 +339,7 @@ model_instance = None
 model_handler = None
 model_def = None
 current_model_type = None
+current_base_model_type = None
 current_model_family = None
 offloadobj = None
 
@@ -594,7 +595,7 @@ def decode_base64_image(image_base64: str) -> Image.Image:
 
 def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAULT_PROFILE):
     """Load the Wan2GP model into VRAM"""
-    global model_instance, model_handler, model_def, current_model_type, current_model_family, offloadobj
+    global model_instance, model_handler, model_def, current_model_type, current_model_family, current_base_model_type, offloadobj
     
     print(f"⏳ Loading model: {model_type} (profile: {profile})...")
     start_time = time.time()
@@ -612,10 +613,11 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
     
     model_instance, offloadobj = load_models(model_type, override_profile=profile)
     current_model_type = model_type
+    current_base_model_type = base_model_type  # Store base model type for generate()
     current_model_family = get_model_family(model_type)
     
     load_time = time.time() - start_time
-    print(f"✅ Model loaded in {load_time:.1f}s (family: {current_model_family})")
+    print(f"✅ Model loaded in {load_time:.1f}s (family: {current_model_family}, base: {base_model_type})")
     
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
@@ -882,6 +884,10 @@ def generate_video_internal(
     # For Lightning models, use euler solver (default is unipc which is slower and lower quality for distilled models)
     if current_model_family == "wan22":
         gen_kwargs["sample_solver"] = "euler"
+    
+    # CRITICAL: Pass model_type and offloadobj - required for the model to function
+    gen_kwargs["model_type"] = current_base_model_type
+    gen_kwargs["offloadobj"] = offloadobj
     
     try:
         # Initialize cache attribute (required by any2video.py for step-skipping logic)
