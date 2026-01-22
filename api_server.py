@@ -889,6 +889,9 @@ def generate_video_internal(
     gen_kwargs["model_type"] = current_base_model_type
     gen_kwargs["offloadobj"] = offloadobj
     
+    # Provide a no-op set_header_text callback (used for UI status updates)
+    gen_kwargs["set_header_text"] = lambda txt: print(f"   Phase: {txt}")
+    
     try:
         # Initialize cache attribute (required by any2video.py for step-skipping logic)
         # Set to None to disable step-skipping cache (TeaCache/MagCache)
