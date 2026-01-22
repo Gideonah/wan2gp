@@ -896,10 +896,14 @@ def generate_video_internal(
         # Initialize cache attribute (required by any2video.py for step-skipping logic)
         # Set to None to disable step-skipping cache (TeaCache/MagCache)
         # The transformer model accesses self.cache in forward(), so we must set it
+        # For dual-phase models, there are TWO transformers (model and model2)
         if hasattr(model_instance, 'model') and model_instance.model is not None:
             # Use object.__setattr__ to bypass PyTorch module's __setattr__
             object.__setattr__(model_instance.model, 'cache', None)
             print(f"   Set model.cache = None")
+        if hasattr(model_instance, 'model2') and model_instance.model2 is not None:
+            object.__setattr__(model_instance.model2, 'cache', None)
+            print(f"   Set model2.cache = None")
         
         result = model_instance.generate(**gen_kwargs)
         
