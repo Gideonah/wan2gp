@@ -316,7 +316,8 @@ RESOLUTION_PRESETS = {
         "1024": (1024, 1024),
     },
     "wan22": {
-        "480p": (848, 480),
+        "default": (832, 480),  # GUI default resolution
+        "480p": (832, 480),
         "480p_portrait": (480, 848),
         "720p": (1280, 720),
         "720p_portrait": (720, 1280),
@@ -408,17 +409,20 @@ class Wan22ImageToVideoRequest(BaseModel):
     image_url: str = Field(..., description="URL of the input image to animate")
     duration: float = Field(5.0, ge=0.3, le=15.0, description="Video duration in seconds")
     
-    resolution_preset: Optional[Literal["480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
-        "480p",
-        description="Resolution preset: 480p, 720p, 576p (and portrait variants)"
+    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
+        "default",
+        description="Resolution preset: default (832x480), 480p, 720p, 576p (and portrait variants)"
     )
     width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
     
-    # Lightning v2 uses fixed 4 steps and guidance 1.0
-    num_inference_steps: int = Field(4, ge=4, le=8, description="Inference steps (4 for Lightning v2)")
-    guidance_scale: float = Field(1.0, ge=1.0, le=5.0, description="CFG scale (1.0 for Lightning v2)")
-    flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter")
+    # Enhanced Lightning v2 defaults from i2v_2_2_Enhanced_Lightning_v2.json
+    num_inference_steps: int = Field(4, ge=4, le=30, description="Inference steps (4 for Lightning v2)")
+    guidance_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning v2)")
+    guidance2_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning v2)")
+    guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for Lightning v2)")
+    switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning v2)")
+    flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning v2)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     
     class Config:
@@ -427,7 +431,7 @@ class Wan22ImageToVideoRequest(BaseModel):
                 "prompt": "(at 0 seconds: wide shot of a woman standing, cinematic lighting). (at 2 seconds: camera slowly zooms in). (at 4 seconds: close-up on face, she smiles).",
                 "image_url": "https://example.com/portrait.jpg",
                 "duration": 5.0,
-                "resolution_preset": "480p",
+                "resolution_preset": "default",
                 "seed": -1
             }
         }
@@ -772,6 +776,9 @@ def generate_video_internal(
     num_frames: int = 121,
     num_inference_steps: int = 8,
     guidance_scale: float = 4.0,
+    guidance2_scale: Optional[float] = None,
+    guidance_phases: int = 1,
+    switch_threshold: int = 0,
     flow_shift: Optional[float] = None,
     seed: int = -1,
     fps: int = 24,
@@ -856,9 +863,16 @@ def generate_video_internal(
         # For LTX2 and other models, pass PIL image as image_start
         gen_kwargs["image_start"] = image_start
     
-    # Add flow_shift for Wan2.2
+    # Add Wan2.2 specific parameters
     if flow_shift is not None:
         gen_kwargs["flow_shift"] = flow_shift
+    
+    # Add dual-phase guidance parameters for Wan2.2
+    if guidance_phases > 1:
+        gen_kwargs["guidance_phases"] = guidance_phases
+        gen_kwargs["switch_threshold"] = switch_threshold
+        if guidance2_scale is not None:
+            gen_kwargs["guide_scale2"] = guidance2_scale
     
     try:
         # Initialize cache attribute (required by any2video.py for step-skipping logic)
@@ -1224,6 +1238,12 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         num_frames = duration_to_frames_wan22(request.duration)
         actual_duration = frames_to_duration(num_frames, WAN22_FPS)
         
+        print(f"   Using Enhanced Lightning v2 settings:")
+        print(f"   - guidance_phases: {request.guidance_phases}")
+        print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
+        print(f"   - switch_threshold: {request.switch_threshold}")
+        print(f"   - flow_shift: {request.flow_shift}")
+        
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
             image_start=image_start,
@@ -1232,6 +1252,9 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
+            guidance2_scale=request.guidance2_scale,
+            guidance_phases=request.guidance_phases,
+            switch_threshold=request.switch_threshold,
             flow_shift=request.flow_shift,
             seed=request.seed,
             fps=WAN22_FPS,
