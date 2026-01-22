@@ -2949,6 +2949,8 @@ if _skip_shared_downloads:
     print("⚡ WAN2GP_SKIP_SHARED_DOWNLOADS enabled: skipping SAM, DWPose, depth, and other preprocessing model downloads")
 
 def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None):
+    global download_shared_done  # Must be declared before use
+    
     def computeList(filename):
         if filename == None:
             return []
@@ -2988,7 +2990,6 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
             process_files_def(**enhancer_def)
 
         download_mmaudio()
-        global download_shared_done
         download_shared_done = True
 
     if model_filename is None: return
