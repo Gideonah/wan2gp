@@ -421,6 +421,7 @@ class Wan22ImageToVideoRequest(BaseModel):
     guidance_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning v2)")
     guidance2_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning v2)")
     guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for Lightning v2)")
+    model_switch_phase: int = Field(1, ge=1, le=2, description="Phase to switch models (1 for Lightning v2)")
     switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning v2)")
     flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning v2)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
@@ -778,6 +779,7 @@ def generate_video_internal(
     guidance_scale: float = 4.0,
     guidance2_scale: Optional[float] = None,
     guidance_phases: int = 1,
+    model_switch_phase: int = 1,
     switch_threshold: int = 0,
     flow_shift: Optional[float] = None,
     seed: int = -1,
@@ -864,15 +866,22 @@ def generate_video_internal(
         gen_kwargs["image_start"] = image_start
     
     # Add Wan2.2 specific parameters
+    # NOTE: model.generate() uses "shift" not "flow_shift"
     if flow_shift is not None:
-        gen_kwargs["flow_shift"] = flow_shift
+        gen_kwargs["shift"] = flow_shift
     
     # Add dual-phase guidance parameters for Wan2.2
-    if guidance_phases > 1:
-        gen_kwargs["guidance_phases"] = guidance_phases
+    # NOTE: model.generate() uses "guide_phases" not "guidance_phases", and "guide2_scale" not "guidance2_scale"
+    if guidance_phases >= 1:
+        gen_kwargs["guide_phases"] = guidance_phases
+        gen_kwargs["model_switch_phase"] = model_switch_phase
         gen_kwargs["switch_threshold"] = switch_threshold
         if guidance2_scale is not None:
-            gen_kwargs["guide_scale2"] = guidance2_scale
+            gen_kwargs["guide2_scale"] = guidance2_scale
+    
+    # For Lightning models, use euler solver (default is unipc which is slower and lower quality for distilled models)
+    if current_model_family == "wan22":
+        gen_kwargs["sample_solver"] = "euler"
     
     try:
         # Initialize cache attribute (required by any2video.py for step-skipping logic)
@@ -1239,10 +1248,10 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         actual_duration = frames_to_duration(num_frames, WAN22_FPS)
         
         print(f"   Using Enhanced Lightning v2 settings:")
-        print(f"   - guidance_phases: {request.guidance_phases}")
+        print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
         print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
         print(f"   - switch_threshold: {request.switch_threshold}")
-        print(f"   - flow_shift: {request.flow_shift}")
+        print(f"   - flow_shift: {request.flow_shift}, sample_solver: euler")
         
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
@@ -1254,6 +1263,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             guidance_scale=request.guidance_scale,
             guidance2_scale=request.guidance2_scale,
             guidance_phases=request.guidance_phases,
+            model_switch_phase=request.model_switch_phase,
             switch_threshold=request.switch_threshold,
             flow_shift=request.flow_shift,
             seed=request.seed,
