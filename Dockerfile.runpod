@@ -1,10 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # Wan2GP LTX-2 Video Generation for RunPod Serverless
 #
-# This Dockerfile follows RunPod's recommended structure for serverless workers.
-# Models are downloaded at runtime (first request will trigger download).
+# This Dockerfile bakes the LTX-2 Distilled model into the image for fast cold starts.
+# Image size: ~25-30GB (includes ~15GB of model weights)
 #
-# BUILD:
+# BUILD (requires network access):
 #   docker build -f Dockerfile.runpod -t YOUR_REGISTRY/ltx2-runpod:latest .
 #   docker push YOUR_REGISTRY/ltx2-runpod:latest
 #
@@ -12,7 +12,7 @@
 #   1. Go to RunPod Console → Serverless → New Endpoint
 #   2. Select your pushed image
 #   3. Configure GPU type (A100, RTX 4090, etc.)
-#   4. Deploy and use the /run or /runsync endpoints
+#   4. Deploy - model is already included, no download needed!
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -22,6 +22,9 @@ FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 # Prevent interactive prompts and ensure unbuffered output
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+
+# HuggingFace cache - set early so model downloads go to right place
+ENV HF_HOME=/workspace/.cache/huggingface
 
 # Install minimal system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +43,7 @@ COPY requirements.txt /app/
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir \
-        runpod~=1.7.6 \
+        runpod \
         fastapi \
         uvicorn \
         httpx \
@@ -61,11 +64,22 @@ COPY handler.py /handler.py
 RUN mkdir -p /workspace/outputs /workspace/.cache/huggingface
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Runtime Configuration
+# BAKE LTX-2 DISTILLED MODEL INTO IMAGE
+# Downloads ~15GB of model weights during build
 # ─────────────────────────────────────────────────────────────────────────────
 
-# HuggingFace cache location (persisted if volume mounted)
-ENV HF_HOME=/workspace/.cache/huggingface
+# Download LTX-2 Distilled FP8 model (~15GB total)
+# Using FP8 transformer to save ~9GB (10GB vs 19GB)
+RUN python /app/download_ltx2_distilled.py --fp8
+
+# Verify model files exist
+RUN echo "Verifying model files..." && \
+    ls -la /workspace/.cache/huggingface/hub/models--DeepBeepMeep--LTX-2/snapshots/*/ltx-2-19b-distilled-fp8_diffusion_model.safetensors && \
+    echo "✅ LTX-2 Distilled FP8 model baked into image"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Model configuration
 ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
