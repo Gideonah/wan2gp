@@ -1,0 +1,82 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Wan2GP LTX-2 Video Generation for RunPod Serverless
+#
+# This Dockerfile follows RunPod's recommended structure for serverless workers.
+# Models are downloaded at runtime (first request will trigger download).
+#
+# BUILD:
+#   docker build -f Dockerfile.runpod -t YOUR_REGISTRY/ltx2-runpod:latest .
+#   docker push YOUR_REGISTRY/ltx2-runpod:latest
+#
+# DEPLOY:
+#   1. Go to RunPod Console → Serverless → New Endpoint
+#   2. Select your pushed image
+#   3. Configure GPU type (A100, RTX 4090, etc.)
+#   4. Deploy and use the /run or /runsync endpoints
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Use RunPod's PyTorch base image with CUDA support
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+# Prevent interactive prompts and ensure unbuffered output
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install minimal system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Set working directory for application code
+WORKDIR /app
+
+# Copy requirements first (for layer caching)
+COPY requirements.txt /app/
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+        runpod~=1.7.6 \
+        fastapi \
+        uvicorn \
+        httpx \
+        python-multipart \
+        google-cloud-storage
+
+# Upgrade PyTorch to 2.6.0 with CUDA 12.4 support
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
+
+# Copy application code
+COPY . /app/
+
+# Copy handler to root (RunPod convention)
+COPY handler.py /handler.py
+
+# Create output and cache directories
+RUN mkdir -p /workspace/outputs /workspace/.cache/huggingface
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace cache location (persisted if volume mounted)
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# Model configuration
+ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+# Skip preprocessing model downloads (not needed for I2V API)
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+
+# Application root for imports
+ENV PYTHONPATH="/app"
+
+# RunPod serverless entry point
+CMD ["python", "-u", "/handler.py"]
