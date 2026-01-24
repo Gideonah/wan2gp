@@ -1,9 +1,0 @@
-# Requirements for Vast.ai PyWorker
-# These are installed when PYWORKER_REPO is cloned
-# 
-# Note: Most deps are already in the baked Docker image.
-# This file is for the PyWorker-specific requirements only.
-
-vastai-sdk
-nltk
-

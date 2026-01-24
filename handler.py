@@ -653,3 +653,4 @@ load_model(DEFAULT_MODEL_TYPE, DEFAULT_PROFILE)
 print("\n✅ Ready to accept requests")
 runpod.serverless.start({"handler": handler})
 
+

@@ -97,3 +97,4 @@ echo ""
 # Start the API server
 exec su -p user -c "python3 api_server.py --port $WAN2GP_PORT --model-type $WAN2GP_MODEL_TYPE --profile $WAN2GP_PROFILE $*"
 
+
