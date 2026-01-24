@@ -114,7 +114,7 @@ cd /workspace
 
 # Start the API server in background, with all output going to log file
 python3 api_server.py \
-    --host 127.0.0.1 \
+    --host 0.0.0.0 \
     --port "$MODEL_SERVER_PORT" \
     --model-type "$WAN2GP_MODEL_TYPE" \
     --profile "$WAN2GP_PROFILE" \
