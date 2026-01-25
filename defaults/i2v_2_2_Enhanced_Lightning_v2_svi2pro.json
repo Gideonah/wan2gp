@@ -13,8 +13,6 @@
 			"https://huggingface.co/DeepBeepMeep/Wan2.2/resolve/main/wan22EnhancedLightning_v2I2VFP8LOW.safetensors"
 		],
 		"author": "https://civitai.com/models/2053259",
-		"loras": "i2v_2_2_svi2pro",
-		"loras_multipliers": "i2v_2_2_svi2pro",	
 		"profile_dirs": [""]
 	},
 	"guidance_phases": 2,	

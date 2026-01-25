@@ -1168,10 +1168,11 @@ def generate_video_svi2pro_internal(
         print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
     
     # Build generation kwargs
+    # NOTE: For SVI2Pro, the model extracts image_start from input_video internally
+    # We pass input_video and pre_video_frame (PIL) for the SVI2Pro reference logic
     gen_kwargs = {
         "input_prompt": prompt,
         "n_prompt": negative_prompt if negative_prompt else None,
-        "image_start": image_start_tensor,
         "image_end": None,
         "width": width,
         "height": height,
@@ -1179,25 +1180,21 @@ def generate_video_svi2pro_internal(
         "sampling_steps": num_inference_steps,
         "guide_scale": guidance_scale,
         "seed": seed,
-        "fps": float(fps),
         "VAE_tile_size": 0,
         "loras_slists": loras_slists,
         "callback": video_progress_callback,
     }
     
-    # Add input_video for i2v flow
+    # Add input_video for i2v flow - the model extracts image_start from this
     if input_video_tensor is not None:
         gen_kwargs["input_video"] = input_video_tensor
     
-    # CRITICAL for SVI2Pro: Pass the start image as pre_video_frame (PIL Image)
-    # This is required by the sliding window code which uses it as the reference
+    # For SVI2Pro: Pass the start image as pre_video_frame (PIL Image)
+    # This is used by the SVI2Pro reference logic in any2video.py
     if image_start is not None:
-        gen_kwargs["pre_video_frame"] = image_start  # PIL Image, not tensor!
-        # Also pass as input_ref_images for the initial window
-        gen_kwargs["input_ref_images"] = [image_start]
-        # window_no starts at 1 for first window (0 means no window yet)
-        gen_kwargs["window_no"] = 1
-        print(f"   Set pre_video_frame, input_ref_images, window_no=1 for SVI2Pro")
+        gen_kwargs["pre_video_frame"] = image_start  # PIL Image for SVI2Pro reference
+        gen_kwargs["window_no"] = 1  # First window
+        print(f"   Set pre_video_frame (PIL), window_no=1 for SVI2Pro")
     
     # Add flow shift
     gen_kwargs["shift"] = flow_shift
@@ -1211,10 +1208,10 @@ def generate_video_svi2pro_internal(
     # Use unipc solver for SVI2Pro (more consistent results than euler)
     gen_kwargs["sample_solver"] = "unipc"
     
-    # Add sliding window configuration
-    gen_kwargs["sliding_window_size"] = sliding_window_size
-    gen_kwargs["sliding_window_overlap"] = sliding_window_overlap
+    # Color correction for SVI2Pro
     gen_kwargs["color_correction_strength"] = color_correction_strength
+    # Note: sliding_window_size/overlap are handled at wgp.py level, not by any2video.py
+    # overlap_size is used for latent overlap, but defaults to 0 for single-window generation
     
     # CRITICAL: Pass model_type and offloadobj
     gen_kwargs["model_type"] = current_base_model_type
