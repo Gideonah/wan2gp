@@ -913,11 +913,15 @@ def generate_video_internal(
     # Wan2.2 i2v models expect input_video as a tensor with shape (C, T, H, W)
     image_start_tensor = None
     input_video_tensor = None
-    if image_start is not None and current_model_family == "wan22":
+    pre_video_frame_pil = None  # For SVI2Pro mode
+    
+    if image_start is not None and current_model_family in ["wan22", "wan22_svi2pro"]:
         # For Wan2.2 i2v: convert PIL image to tensor and pass as input_video
         image_start_tensor = convert_pil_image_to_tensor(image_start)
         # Add time dimension: (C, H, W) -> (C, 1, H, W)
         input_video_tensor = image_start_tensor.unsqueeze(1)
+        # For SVI2Pro, also keep reference to PIL image
+        pre_video_frame_pil = image_start
         print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
     
     # Build generation kwargs
@@ -941,7 +945,17 @@ def generate_video_internal(
     # For Wan2.2 i2v models, pass the image as input_video (required for i2v_class flow)
     if input_video_tensor is not None:
         gen_kwargs["input_video"] = input_video_tensor
-    elif image_start is not None and current_model_family != "wan22":
+        
+        # For SVI2Pro models, also pass pre_video_frame and window_no
+        # This is required by the SVI2Pro logic in any2video.py (lines 647-651)
+        if current_model_family == "wan22_svi2pro" and pre_video_frame_pil is not None:
+            gen_kwargs["pre_video_frame"] = pre_video_frame_pil  # PIL Image
+            gen_kwargs["window_no"] = 1  # First window
+            gen_kwargs["prefix_video"] = input_video_tensor  # Same as input_video for first frame
+            gen_kwargs["prefix_frames_count"] = 1
+            print(f"   SVI2Pro: Set pre_video_frame, window_no=1, prefix_video")
+            
+    elif image_start is not None and current_model_family not in ["wan22", "wan22_svi2pro"]:
         # For LTX2 and other models, pass PIL image as image_start
         gen_kwargs["image_start"] = image_start
     
@@ -1736,8 +1750,10 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
         print(f"   - temporal_upsampling: {request.temporal_upsampling}")
         print(f"   - base_fps: {base_fps}, output_fps: {output_fps}")
         
-        # Generate video with sliding window support
-        output_path, gen_time, metadata = generate_video_svi2pro_internal(
+        # Generate video using the SAME function as regular WAN22
+        # The svi2pro: true in model_def triggers SVI2Pro behavior in any2video.py
+        # The model's internal config handles SVI2Pro latent setup
+        output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
             image_start=image_start,
             width=width,
@@ -1752,11 +1768,11 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
             flow_shift=request.flow_shift,
             seed=request.seed,
             fps=base_fps,
-            sliding_window_size=request.sliding_window_size,
-            sliding_window_overlap=request.sliding_window_overlap,
-            color_correction_strength=request.color_correction_strength,
-            temporal_upsampling=request.temporal_upsampling,
         )
+        
+        # TODO: RIFE upsampling disabled for now - needs proper tensor handling
+        if request.temporal_upsampling and request.temporal_upsampling in ["rife2", "rife4"]:
+            print(f"⚠️ RIFE upsampling ({request.temporal_upsampling}) requested but not yet implemented")
         
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
