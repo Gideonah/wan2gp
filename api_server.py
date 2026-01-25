@@ -303,19 +303,36 @@ MODEL_FAMILIES = {
     "z_image_control2": "z_image",
     "i2v_2_2": "wan22",
     "i2v_2_2_Enhanced_Lightning_v2": "wan22",
+    "i2v_2_2_svi2pro": "wan22_svi2pro",
+    "i2v_2_2_Enhanced_Lightning_v2_svi2pro": "wan22_svi2pro",
 }
+
+# SVI2Pro Sliding Window settings (from env vars or defaults)
+SVI2PRO_SLIDING_WINDOW_SIZE = int(os.environ.get("WAN2GP_SLIDING_WINDOW_SIZE", "81"))
+SVI2PRO_SLIDING_WINDOW_OVERLAP = int(os.environ.get("WAN2GP_SLIDING_WINDOW_OVERLAP", "4"))
+SVI2PRO_COLOR_CORRECTION_STRENGTH = float(os.environ.get("WAN2GP_COLOR_CORRECTION_STRENGTH", "1.0"))
+SVI2PRO_TEMPORAL_UPSAMPLING = os.environ.get("WAN2GP_TEMPORAL_UPSAMPLING", "rife2")
 
 # Resolution presets per model family
 RESOLUTION_PRESETS = {
     "ltx2": {
         "480p": (832, 480),
-    "480p_portrait": (480, 832),
+        "480p_portrait": (480, 832),
         "720p": (1280, 720),
-    "720p_portrait": (720, 1280),
+        "720p_portrait": (720, 1280),
         "768": (768, 768),
         "1024": (1024, 1024),
     },
     "wan22": {
+        "default": (832, 480),  # GUI default resolution
+        "480p": (832, 480),
+        "480p_portrait": (480, 848),
+        "720p": (1280, 720),
+        "720p_portrait": (720, 1280),
+        "576p": (1024, 576),
+        "576p_portrait": (576, 1024),
+    },
+    "wan22_svi2pro": {
         "default": (832, 480),  # GUI default resolution
         "480p": (832, 480),
         "480p_portrait": (480, 848),
@@ -434,6 +451,67 @@ class Wan22ImageToVideoRequest(BaseModel):
                 "image_url": "https://example.com/portrait.jpg",
                 "duration": 5.0,
                 "resolution_preset": "default",
+                "seed": -1
+            }
+        }
+
+
+class SVI2ProImageToVideoRequest(BaseModel):
+    """
+    Request model for WAN 2.2 SVI2Pro Enhanced Lightning v2 generation.
+    
+    SVI2Pro (Stable Video Infinity Pro 2) supports potentially unlimited video length
+    via the sliding window method. Perfect for videos longer than 10 seconds.
+    
+    Features:
+    - Sliding window generation for long videos
+    - RIFE x2 temporal upsampling for smoother output
+    - Color correction between windows for consistency
+    - 8-step distilled inference
+    """
+    prompt: str = Field(..., description="Text prompt describing the video (supports temporal markers)")
+    image_url: str = Field(..., description="URL of the input image to animate")
+    duration: float = Field(10.0, ge=0.3, le=120.0, description="Video duration in seconds (supports long videos via sliding window)")
+    
+    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
+        "default",
+        description="Resolution preset: default (832x480), 480p, 720p, 576p (and portrait variants)"
+    )
+    width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
+    height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
+    
+    # SVI2Pro Enhanced Lightning v2 defaults (from i2v_2_2_Enhanced_Lightning_v2_svi2pro.json)
+    num_inference_steps: int = Field(8, ge=4, le=30, description="Inference steps (8 for SVI2Pro Lightning)")
+    guidance_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning)")
+    guidance2_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning)")
+    guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for Lightning)")
+    model_switch_phase: int = Field(1, ge=1, le=2, description="Phase to switch models (1 for Lightning)")
+    switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning)")
+    flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning)")
+    seed: int = Field(-1, description="Random seed (-1 for random)")
+    
+    # Sliding window settings
+    sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
+    sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows (4 for SVI2Pro)")
+    color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows (1.0 recommended)")
+    
+    # Post-processing
+    temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field(
+        "rife2",
+        description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "prompt": "(at 0 seconds: a man opens his fridge, takes a beer and drinks it)",
+                "image_url": "https://example.com/kitchen.jpg",
+                "duration": 10.0,
+                "resolution_preset": "default",
+                "sliding_window_size": 81,
+                "sliding_window_overlap": 4,
+                "color_correction_strength": 1.0,
+                "temporal_upsampling": "rife2",
                 "seed": -1
             }
         }
@@ -964,6 +1042,217 @@ def generate_video_internal(
     return str(output_path), generation_time, metadata
 
 
+def perform_rife_upsampling(sample: torch.Tensor, temporal_upsampling: str, fps: int) -> tuple:
+    """
+    Apply RIFE temporal upsampling to video tensor.
+    
+    Args:
+        sample: Video tensor (C, T, H, W)
+        temporal_upsampling: 'rife2' for 2x, 'rife4' for 4x
+        fps: Original fps
+        
+    Returns:
+        tuple: (upsampled_tensor, output_fps)
+    """
+    if temporal_upsampling not in ["rife2", "rife4"]:
+        return sample, fps
+    
+    exp = 1 if temporal_upsampling == "rife2" else 2
+    output_fps = fps * (2 ** exp)
+    
+    print(f"🎬 Applying RIFE temporal upsampling ({temporal_upsampling})...")
+    print(f"   Input: {sample.shape[1]} frames @ {fps} fps")
+    
+    try:
+        from postprocessing.rife.inference import temporal_interpolation
+        
+        # RIFE expects (C, T, H, W) tensor
+        sample = temporal_interpolation(sample, exp=exp)
+        
+        print(f"   Output: {sample.shape[1]} frames @ {output_fps} fps")
+        
+    except Exception as e:
+        print(f"⚠️ RIFE upsampling failed: {e}, returning original")
+        return sample, fps
+    
+    return sample, output_fps
+
+
+def generate_video_svi2pro_internal(
+    prompt: str,
+    image_start: Optional[Image.Image] = None,
+    negative_prompt: str = "",
+    width: int = 832,
+    height: int = 480,
+    num_frames: int = 81,
+    num_inference_steps: int = 8,
+    guidance_scale: float = 1.0,
+    guidance2_scale: float = 1.0,
+    guidance_phases: int = 2,
+    model_switch_phase: int = 1,
+    switch_threshold: int = 900,
+    flow_shift: float = 5.0,
+    seed: int = -1,
+    fps: int = 16,
+    sliding_window_size: int = 81,
+    sliding_window_overlap: int = 4,
+    color_correction_strength: float = 1.0,
+    temporal_upsampling: str = "rife2",
+) -> tuple[str, float, dict]:
+    """
+    Generate video using WAN 2.2 SVI2Pro with sliding window for long videos.
+    
+    This function supports:
+    - Sliding window generation for videos longer than window_size
+    - RIFE x2/x4 temporal upsampling
+    - Color correction between windows
+    """
+    global model_instance, model_def, current_model_family
+    
+    if model_instance is None:
+        raise RuntimeError("Model not loaded")
+    
+    # Handle seed
+    if seed < 0:
+        seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
+    
+    job_id = str(uuid.uuid4())[:8]
+    output_path = OUTPUT_DIR / f"{job_id}.mp4"
+    
+    print(f"🎬 Generating SVI2Pro video: {prompt[:50]}...")
+    print(f"   Resolution: {width}x{height}, Frames: {num_frames}, Steps: {num_inference_steps}")
+    print(f"   Duration: {frames_to_duration(num_frames, fps)}s @ {fps}fps")
+    print(f"   Sliding Window: size={sliding_window_size}, overlap={sliding_window_overlap}")
+    print(f"   Color Correction: {color_correction_strength}, Temporal Upsampling: {temporal_upsampling}")
+    if image_start is not None:
+        print(f"   Input image: {image_start.size[0]}x{image_start.size[1]}")
+    
+    start_time = time.time()
+    
+    # Set up offload shared state
+    offload.shared_state["_attention"] = "sdpa"
+    offload.shared_state["_chipmunk"] = False
+    offload.shared_state["_radial"] = False
+    offload.shared_state["_nag_scale"] = 1.0
+    offload.shared_state["_nag_tau"] = 3.5
+    offload.shared_state["_nag_alpha"] = 0.5
+    
+    model_instance._interrupt = False
+    
+    loras_slists = {
+        "phase1": [], "phase2": [], "phase3": [], "shared": [],
+        "model_switch_step": num_inference_steps,
+        "model_switch_step2": num_inference_steps,
+    }
+    
+    # Progress callback
+    def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
+        if step >= 0:
+            steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
+            extra = f" {denoising_extra}" if denoising_extra else ""
+            print(f"   Step {step + 1}/{steps_display}{extra}")
+    
+    # Convert image_start to tensor format for Wan2.2 i2v models
+    image_start_tensor = None
+    input_video_tensor = None
+    if image_start is not None:
+        image_start_tensor = convert_pil_image_to_tensor(image_start)
+        input_video_tensor = image_start_tensor.unsqueeze(1)
+        print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
+    
+    # Build generation kwargs
+    gen_kwargs = {
+        "input_prompt": prompt,
+        "n_prompt": negative_prompt if negative_prompt else None,
+        "image_start": image_start_tensor,
+        "image_end": None,
+        "width": width,
+        "height": height,
+        "frame_num": num_frames,
+        "sampling_steps": num_inference_steps,
+        "guide_scale": guidance_scale,
+        "seed": seed,
+        "fps": float(fps),
+        "VAE_tile_size": 0,
+        "loras_slists": loras_slists,
+        "callback": video_progress_callback,
+    }
+    
+    # Add input_video for i2v flow
+    if input_video_tensor is not None:
+        gen_kwargs["input_video"] = input_video_tensor
+    
+    # Add flow shift
+    gen_kwargs["shift"] = flow_shift
+    
+    # Add dual-phase guidance parameters
+    gen_kwargs["guide_phases"] = guidance_phases
+    gen_kwargs["model_switch_phase"] = model_switch_phase
+    gen_kwargs["switch_threshold"] = switch_threshold
+    gen_kwargs["guide2_scale"] = guidance2_scale
+    
+    # Use euler solver for Lightning models
+    gen_kwargs["sample_solver"] = "euler"
+    
+    # Add sliding window configuration
+    gen_kwargs["sliding_window_size"] = sliding_window_size
+    gen_kwargs["sliding_window_overlap"] = sliding_window_overlap
+    gen_kwargs["color_correction_strength"] = color_correction_strength
+    
+    # CRITICAL: Pass model_type and offloadobj
+    gen_kwargs["model_type"] = current_base_model_type
+    gen_kwargs["offloadobj"] = offloadobj
+    
+    # Provide a no-op set_header_text callback
+    gen_kwargs["set_header_text"] = lambda txt: print(f"   Phase: {txt}")
+    
+    try:
+        # Initialize cache attribute
+        if hasattr(model_instance, 'model') and model_instance.model is not None:
+            object.__setattr__(model_instance.model, 'cache', None)
+            print(f"   Set model.cache = None")
+        if hasattr(model_instance, 'model2') and model_instance.model2 is not None:
+            object.__setattr__(model_instance.model2, 'cache', None)
+            print(f"   Set model2.cache = None")
+        
+        result = model_instance.generate(**gen_kwargs)
+        
+        # Extract video tensor
+        if isinstance(result, dict):
+            video_tensor = result.get("x", result)
+        else:
+            video_tensor = result
+        
+        # Apply RIFE temporal upsampling if requested
+        output_fps = fps
+        if temporal_upsampling and temporal_upsampling in ["rife2", "rife4"]:
+            video_tensor, output_fps = perform_rife_upsampling(video_tensor, temporal_upsampling, fps)
+        
+        # Save video
+        save_video(video_tensor, str(output_path), fps=output_fps)
+        
+    except Exception as e:
+        traceback.print_exc()
+        raise RuntimeError(f"Generation failed: {str(e)}")
+    finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    generation_time = time.time() - start_time
+    print(f"✅ SVI2Pro video saved to {output_path} in {generation_time:.1f}s")
+    
+    metadata = {
+        "num_frames": num_frames,
+        "duration": frames_to_duration(num_frames, fps),
+        "fps": output_fps,
+        "width": width,
+        "height": height,
+        "seed": seed,
+    }
+    
+    return str(output_path), generation_time, metadata
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # FASTAPI APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1049,6 +1338,21 @@ async def get_info():
                 "min_frames": WAN22_MIN_FRAMES,
                 "frame_step": WAN22_FRAME_STEP,
                 "resolution_presets": RESOLUTION_PRESETS["wan22"],
+            },
+            "wan22_svi2pro": {
+                "type": "image-to-video-long",
+                "description": "SVI2Pro for long videos with sliding window",
+                "fps": WAN22_FPS,
+                "output_fps_rife2": WAN22_FPS * 2,
+                "min_frames": WAN22_MIN_FRAMES,
+                "frame_step": WAN22_FRAME_STEP,
+                "resolution_presets": RESOLUTION_PRESETS["wan22_svi2pro"],
+                "sliding_window": {
+                    "default_size": SVI2PRO_SLIDING_WINDOW_SIZE,
+                    "default_overlap": SVI2PRO_SLIDING_WINDOW_OVERLAP,
+                    "default_color_correction": SVI2PRO_COLOR_CORRECTION_STRENGTH,
+                    "default_temporal_upsampling": SVI2PRO_TEMPORAL_UPSAMPLING,
+                },
             },
         },
     }
@@ -1185,8 +1489,10 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         if gcs_success:
             # Use the GCS signed URL
             full_url = gcs_url
+            # Clean up local file after successful upload
+            cleanup_local_file(output_path)
         else:
-            # Fallback to local download URL
+            # Fallback to local download URL (keep file for local serving)
             print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
             base_url = str(http_request.base_url).rstrip("/")
             full_url = f"{base_url}/download/{filename}"
@@ -1295,8 +1601,10 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         if gcs_success:
             # Use the GCS signed URL
             full_url = gcs_url
+            # Clean up local file after successful upload
+            cleanup_local_file(output_path)
         else:
-            # Fallback to local download URL
+            # Fallback to local download URL (keep file for local serving)
             print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
             base_url = str(http_request.base_url).rstrip("/")
             full_url = f"{base_url}/download/{filename}"
@@ -1322,6 +1630,146 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: WAN2.2 SVI2Pro (Image-to-Video with Sliding Window)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/generate/svi2pro/i2v", response_model=GenerationResponse)
+async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request: Request):
+    """
+    Generate a long video from an image (WAN 2.2 SVI2Pro Enhanced Lightning v2)
+    
+    Features:
+    - Sliding window generation for videos longer than 10 seconds
+    - 8-step SVI2Pro Lightning inference
+    - RIFE x2 temporal upsampling for smoother output (doubles fps)
+    - Color correction between windows for consistency
+    - 16 FPS base output (32 FPS with RIFE x2)
+    
+    This endpoint is optimized for long video generation. For videos under 5 seconds,
+    use the /generate/wan22/i2v endpoint instead for faster generation.
+    
+    Prompt format for temporal control:
+    "(at 0 seconds: description). (at 5 seconds: description)."
+    
+    Resolution: 480p or 720p (and portrait variants).
+    """
+    if model_instance is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    if current_model_family not in ["wan22_svi2pro", "wan22"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Wrong model loaded. Need wan22_svi2pro or wan22, got {current_model_family}. Use /reload endpoint."
+        )
+    
+    job_id = str(uuid.uuid4())[:8]
+    
+    try:
+        width, height = resolve_resolution(
+            "wan22_svi2pro" if current_model_family == "wan22_svi2pro" else "wan22",
+            resolution_preset=request.resolution_preset,
+            width=request.width,
+            height=request.height,
+        )
+        
+        # Fetch and resize image
+        print(f"📥 Fetching image from: {request.image_url[:80]}...")
+        try:
+            image_start = await fetch_image_from_url(request.image_url)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
+        
+        image_start = image_start.resize((width, height), Image.LANCZOS)
+        
+        num_frames = duration_to_frames_wan22(request.duration)
+        base_fps = WAN22_FPS
+        
+        # Calculate output fps based on temporal upsampling
+        if request.temporal_upsampling == "rife2":
+            output_fps = base_fps * 2
+        elif request.temporal_upsampling == "rife4":
+            output_fps = base_fps * 4
+        else:
+            output_fps = base_fps
+        
+        actual_duration = frames_to_duration(num_frames, base_fps)
+        
+        print(f"   Using SVI2Pro Enhanced Lightning v2 settings:")
+        print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
+        print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
+        print(f"   - switch_threshold: {request.switch_threshold}")
+        print(f"   - flow_shift: {request.flow_shift}, sample_solver: euler")
+        print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}")
+        print(f"   - color_correction_strength: {request.color_correction_strength}")
+        print(f"   - temporal_upsampling: {request.temporal_upsampling}")
+        print(f"   - base_fps: {base_fps}, output_fps: {output_fps}")
+        
+        # Generate video with sliding window support
+        output_path, gen_time, metadata = generate_video_svi2pro_internal(
+            prompt=request.prompt,
+            image_start=image_start,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
+            guidance2_scale=request.guidance2_scale,
+            guidance_phases=request.guidance_phases,
+            model_switch_phase=request.model_switch_phase,
+            switch_threshold=request.switch_threshold,
+            flow_shift=request.flow_shift,
+            seed=request.seed,
+            fps=base_fps,
+            sliding_window_size=request.sliding_window_size,
+            sliding_window_overlap=request.sliding_window_overlap,
+            color_correction_strength=request.color_correction_strength,
+            temporal_upsampling=request.temporal_upsampling,
+        )
+        
+        filename = Path(output_path).name
+        job_id = filename.replace(".mp4", "")
+        
+        # Upload to GCS and get signed URL
+        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        
+        if gcs_success:
+            full_url = gcs_url
+            # Clean up local file after successful upload
+            cleanup_local_file(output_path)
+        else:
+            # Fallback to local download URL (keep file for local serving)
+            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
+            base_url = str(http_request.base_url).rstrip("/")
+            full_url = f"{base_url}/download/{filename}"
+        
+        # Account for RIFE upsampling in output frame count
+        output_num_frames = num_frames
+        if request.temporal_upsampling == "rife2":
+            output_num_frames = num_frames * 2 - 1
+        elif request.temporal_upsampling == "rife4":
+            output_num_frames = num_frames * 4 - 3
+        
+        return GenerationResponse(
+            status="success",
+            job_id=job_id,
+            output_url=full_url,
+            video_url=full_url,
+            generation_time_seconds=round(gen_time, 2),
+            duration_seconds=actual_duration,
+            num_frames=output_num_frames,
+            width=metadata["width"],
+            height=metadata["height"],
+            seed=metadata["seed"],
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        return GenerationResponse(status="error", job_id=job_id, message=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS: GENERIC (Legacy/Base64)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1330,7 +1778,7 @@ async def generate_i2v_legacy(request: LTX2ImageToVideoRequest, http_request: Re
     """Legacy endpoint - routes to current model's I2V"""
     if current_model_family == "ltx2":
         return await generate_ltx2_i2v(request, http_request)
-    elif current_model_family == "wan22":
+    elif current_model_family in ["wan22", "wan22_svi2pro"]:
         # Convert request
         wan_request = Wan22ImageToVideoRequest(
             prompt=request.prompt,
@@ -1460,13 +1908,42 @@ async def download_file(filename: str):
     return FileResponse(str(file_path), media_type=media_type, filename=filename)
 
 
+def cleanup_local_file(file_path: str, delay_seconds: float = 0) -> bool:
+    """
+    Delete a local file after successful GCS upload.
+    
+    Args:
+        file_path: Path to the file to delete
+        delay_seconds: Optional delay before deletion (for async cleanup)
+        
+    Returns:
+        bool: True if deleted successfully
+    """
+    try:
+        path = Path(file_path)
+        if path.exists():
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+            path.unlink()
+            print(f"🗑️ Cleaned up local file: {path.name}")
+            return True
+    except Exception as e:
+        print(f"⚠️ Failed to cleanup {file_path}: {e}")
+    return False
+
+
 @app.delete("/files/{job_id}")
 async def delete_file(job_id: str):
     """Delete a generated file"""
+    deleted = False
     for ext in [".mp4", ".png"]:
         file_path = OUTPUT_DIR / f"{job_id}{ext}"
-    if file_path.exists():
-        file_path.unlink()
+        if file_path.exists():
+            file_path.unlink()
+            deleted = True
+            print(f"🗑️ Deleted file: {file_path.name}")
+    
+    if deleted:
         return {"status": "deleted", "job_id": job_id}
     raise HTTPException(status_code=404, detail="File not found")
 
@@ -1521,12 +1998,13 @@ def main():
 ║  Output Dir: {str(OUTPUT_DIR):<60} ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Endpoints:                                                                   ║
-║    POST /generate/image      - Z-Image text-to-image                          ║
-║    POST /generate/ltx2/i2v   - LTX-2 image-to-video                           ║
-║    POST /generate/wan22/i2v  - Wan2.2 Lightning v2 image-to-video             ║
-║    POST /reload              - Switch model type                              ║
-║    GET  /health              - Health check                                   ║
-║    GET  /info                - API information                                ║
+║    POST /generate/image       - Z-Image text-to-image                         ║
+║    POST /generate/ltx2/i2v    - LTX-2 image-to-video                          ║
+║    POST /generate/wan22/i2v   - Wan2.2 Lightning v2 image-to-video            ║
+║    POST /generate/svi2pro/i2v - SVI2Pro long video (sliding window, RIFE x2)  ║
+║    POST /reload               - Switch model type                             ║
+║    GET  /health               - Health check                                  ║
+║    GET  /info                 - API information                               ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     """)
     

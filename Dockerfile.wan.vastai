@@ -1,0 +1,162 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# WAN 2.2 SVI2Pro Enhanced Lightning Video Generation for Vast.ai Serverless
+# 
+# This Dockerfile creates an image optimized for Vast.ai deployment:
+#   - Models downloaded at RUNTIME (smaller image, ~8GB)
+#   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
+#   - No LoRAs downloaded
+#   - STANDARD Vast.ai PyWorker integration via start_server.sh
+#
+# BUILD PROCESS (run on a GPU machine for SageAttention):
+#   docker build -f Dockerfile.wan.vastai -t YOUR_REGISTRY/wan-vastai:latest .
+#   docker push YOUR_REGISTRY/wan-vastai:latest
+#
+# VAST.AI TEMPLATE SETTINGS:
+#   Image: YOUR_REGISTRY/wan-vastai:latest
+#   Docker Options: --gpus all
+#   On-Start Script: /workspace/start_wan_vastai.sh
+#   Environment Variables:
+#     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
+#     PYWORKER_REF: main (optional, defaults to main)
+#
+# NOTE: First startup will download model weights (~20GB for WAN 2.2 SVI2Pro).
+#       Mount a persistent volume to /workspace/ckpts for faster restarts.
+#
+# FEATURES:
+#   - SVI2Pro Lightning settings (8 steps, dual-phase guidance)
+#   - RIFE x2 temporal upsampling for smoother videos
+#   - Color correction strength 1.0 for sliding window continuity
+#   - Supports videos >10 seconds via sliding window method
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies (minimal install)
+RUN apt update && \
+    apt install -y --no-install-recommends \
+    python3 python3-pip git wget curl cmake ninja-build \
+    libgl1 libglib2.0-0 ffmpeg ca-certificates && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /workspace
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+
+COPY requirements.txt .
+
+RUN pip install --upgrade pip setuptools wheel
+
+# Install PyTorch with CUDA support FIRST (required for packages with CUDA extensions)
+RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
+
+# Install requirements (insightface needs PyTorch/CUDA already installed)
+RUN pip install -r requirements.txt
+
+# Install additional API dependencies
+RUN pip install fastapi uvicorn python-multipart httpx google-cloud-storage
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SageAttention (compile for target GPU architectures)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
+ENV FORCE_CUDA="1"
+ENV MAX_JOBS="1"
+
+COPY <<EOF /tmp/patch_setup.py
+import os
+with open('setup.py', 'r') as f:
+    content = f.read()
+
+arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST')
+arch_set = '{' + ', '.join([f'"{arch}"' for arch in arch_list.split(';')]) + '}'
+
+old_section = '''compute_capabilities = set()
+device_count = torch.cuda.device_count()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 8:
+        warnings.warn(f"skipping GPU {i} with compute capability {major}.{minor}")
+        continue
+    compute_capabilities.add(f"{major}.{minor}")'''
+
+new_section = 'compute_capabilities = ' + arch_set + '''
+print(f"Manually set compute capabilities: {compute_capabilities}")'''
+
+content = content.replace(old_section, new_section)
+
+with open('setup.py', 'w') as f:
+    f.write(content)
+EOF
+
+RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
+    cd /tmp/sageattention && \
+    python3 /tmp/patch_setup.py && \
+    pip install --no-build-isolation . && \
+    rm -rf /tmp/sageattention /tmp/patch_setup.py /root/.cache/* || \
+    echo "⚠️  SageAttention skipped (no CUDA during build)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application Code
+# ─────────────────────────────────────────────────────────────────────────────
+
+COPY . /workspace/
+
+# Create directories
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
+
+# Make scripts executable
+RUN chmod +x /workspace/start_wan_vastai.sh /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace cache location
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# Model configuration (WAN 2.2 SVI2Pro Enhanced Lightning v2)
+ENV WAN2GP_MODEL_TYPE="i2v_2_2_Enhanced_Lightning_v2_svi2pro"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+# Sliding window configuration for long videos
+ENV WAN2GP_SLIDING_WINDOW_SIZE="81"
+ENV WAN2GP_SLIDING_WINDOW_OVERLAP="4"
+ENV WAN2GP_COLOR_CORRECTION_STRENGTH="1"
+ENV WAN2GP_TEMPORAL_UPSAMPLING="rife2"
+
+# CRITICAL: Skip shared preprocessing model downloads (SAM, DWPose, depth, etc.)
+# The API server only uses direct I2V - no need for these preprocessing models
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+
+# Backend API server port (internal)
+ENV MODEL_SERVER_PORT="8000"
+
+# Log file for PyWorker monitoring
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
+
+# Vast.ai will expose port 80 for the PyWorker
+EXPOSE 80
+# Also expose 8000 for direct API access
+EXPOSE 8000
+
+# Healthcheck via the PyWorker proxy
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Start using standard Vast.ai approach:
+# 1. Starts backend API server (downloads models on first run)
+# 2. Calls wget start_server.sh which installs vastai-sdk and runs worker.py from PYWORKER_REPO
+CMD ["/workspace/start_wan_vastai.sh"]
+
