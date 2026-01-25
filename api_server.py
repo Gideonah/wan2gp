@@ -1708,6 +1708,10 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
             detail=f"Wrong model loaded. Need wan22_svi2pro or wan22, got {current_model_family}. Use /reload endpoint."
         )
     
+    # Warn if using non-SVI model with SVI2Pro endpoint
+    if current_model_family == "wan22":
+        print("⚠️ Warning: Using non-SVI2Pro model with SVI2Pro endpoint. For best results, load an SVI2Pro model.")
+    
     job_id = str(uuid.uuid4())[:8]
     
     try:
@@ -1750,10 +1754,9 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
         print(f"   - temporal_upsampling: {request.temporal_upsampling}")
         print(f"   - base_fps: {base_fps}, output_fps: {output_fps}")
         
-        # Generate video using the SAME function as regular WAN22
-        # The svi2pro: true in model_def triggers SVI2Pro behavior in any2video.py
-        # The model's internal config handles SVI2Pro latent setup
-        output_path, gen_time, metadata = generate_video_internal(
+        # Use the dedicated SVI2Pro internal function which properly handles all SVI2Pro parameters
+        # including overlap_size, color_correction_strength, and proper prefix_video setup
+        output_path, gen_time, metadata = generate_video_svi2pro_internal(
             prompt=request.prompt,
             image_start=image_start,
             width=width,
@@ -1768,11 +1771,11 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
             flow_shift=request.flow_shift,
             seed=request.seed,
             fps=base_fps,
+            sliding_window_size=request.sliding_window_size,
+            sliding_window_overlap=request.sliding_window_overlap,
+            color_correction_strength=request.color_correction_strength,
+            temporal_upsampling=request.temporal_upsampling or "",
         )
-        
-        # TODO: RIFE upsampling disabled for now - needs proper tensor handling
-        if request.temporal_upsampling and request.temporal_upsampling in ["rife2", "rife4"]:
-            print(f"⚠️ RIFE upsampling ({request.temporal_upsampling}) requested but not yet implemented")
         
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
