@@ -959,9 +959,9 @@ def generate_video_internal(
         if guidance2_scale is not None:
             gen_kwargs["guide2_scale"] = guidance2_scale
     
-    # For Lightning models, use euler solver (default is unipc which is slower and lower quality for distilled models)
-    if current_model_family == "wan22":
-        gen_kwargs["sample_solver"] = "euler"
+    # For WAN22 models, use unipc solver for better consistency
+    if current_model_family in ["wan22", "wan22_svi2pro"]:
+        gen_kwargs["sample_solver"] = "unipc"
     
     # CRITICAL: Pass model_type and offloadobj - required for the model to function
     gen_kwargs["model_type"] = current_base_model_type
@@ -1065,14 +1065,21 @@ def perform_rife_upsampling(sample: torch.Tensor, temporal_upsampling: str, fps:
     
     try:
         from postprocessing.rife.inference import temporal_interpolation
+        from shared.utils import files_locator as fl
         
-        # RIFE expects (C, T, H, W) tensor
-        sample = temporal_interpolation(sample, exp=exp)
+        # Use the same model path resolution as wgp.py
+        rife_model_path = fl.locate_file("flownet.pkl")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # temporal_interpolation(model_path, frames, exp, device)
+        sample = temporal_interpolation(rife_model_path, sample, exp, device)
         
         print(f"   Output: {sample.shape[1]} frames @ {output_fps} fps")
         
     except Exception as e:
         print(f"⚠️ RIFE upsampling failed: {e}, returning original")
+        import traceback
+        traceback.print_exc()
         return sample, fps
     
     return sample, output_fps
@@ -1201,8 +1208,8 @@ def generate_video_svi2pro_internal(
     gen_kwargs["switch_threshold"] = switch_threshold
     gen_kwargs["guide2_scale"] = guidance2_scale
     
-    # Use euler solver for Lightning models
-    gen_kwargs["sample_solver"] = "euler"
+    # Use unipc solver for SVI2Pro (more consistent results than euler)
+    gen_kwargs["sample_solver"] = "unipc"
     
     # Add sliding window configuration
     gen_kwargs["sliding_window_size"] = sliding_window_size
@@ -1583,7 +1590,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
         print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
         print(f"   - switch_threshold: {request.switch_threshold}")
-        print(f"   - flow_shift: {request.flow_shift}, sample_solver: euler")
+        print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
         
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
@@ -1708,7 +1715,7 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
         print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
         print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
         print(f"   - switch_threshold: {request.switch_threshold}")
-        print(f"   - flow_shift: {request.flow_shift}, sample_solver: euler")
+        print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
         print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}")
         print(f"   - color_correction_strength: {request.color_correction_strength}")
         print(f"   - temporal_upsampling: {request.temporal_upsampling}")
