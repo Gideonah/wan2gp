@@ -1182,6 +1182,16 @@ def generate_video_svi2pro_internal(
     if input_video_tensor is not None:
         gen_kwargs["input_video"] = input_video_tensor
     
+    # CRITICAL for SVI2Pro: Pass the start image as pre_video_frame (PIL Image)
+    # This is required by the sliding window code which uses it as the reference
+    if image_start is not None:
+        gen_kwargs["pre_video_frame"] = image_start  # PIL Image, not tensor!
+        # Also pass as input_ref_images for the initial window
+        gen_kwargs["input_ref_images"] = [image_start]
+        # window_no starts at 1 for first window (0 means no window yet)
+        gen_kwargs["window_no"] = 1
+        print(f"   Set pre_video_frame, input_ref_images, window_no=1 for SVI2Pro")
+    
     # Add flow shift
     gen_kwargs["shift"] = flow_shift
     
