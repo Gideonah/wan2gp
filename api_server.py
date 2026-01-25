@@ -109,6 +109,7 @@ import uvicorn
 # Now it's safe to import from wgp/mmgp
 from mmgp import offload
 from shared.utils.audio_video import save_video
+from shared.utils.loras_mutipliers import parse_loras_multipliers
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -718,6 +719,67 @@ def unload_model():
     torch.cuda.empty_cache()
 
 
+def get_loras_slists_for_model(
+    num_inference_steps: int,
+    guidance_phases: int = 2,
+    model_switch_phase: int = 1,
+) -> dict:
+    """
+    Generate the proper loras_slists from the model's LoRA configuration.
+    
+    For SVI2Pro and Lightning models, this parses the loras_multipliers 
+    (e.g., ["1;0", "0;1"]) into phase-specific multiplier schedules.
+    
+    Args:
+        num_inference_steps: Number of denoising steps
+        guidance_phases: Number of guidance phases (1-3)
+        model_switch_phase: Phase at which to switch models
+        
+    Returns:
+        dict with phase1, phase2, phase3, shared lists
+    """
+    from wgp import get_transformer_loras
+    
+    try:
+        # Get LoRA filenames and multipliers from model definition
+        transformer_loras_filenames, transformer_loras_multipliers = get_transformer_loras(current_model_type)
+        
+        if transformer_loras_filenames is None or len(transformer_loras_filenames) == 0:
+            # No LoRAs configured - return empty structure
+            return {
+                "phase1": [], "phase2": [], "phase3": [], "shared": [],
+                "model_switch_step": num_inference_steps,
+                "model_switch_step2": num_inference_steps,
+            }
+        
+        # Parse the multipliers into phase structure
+        # This handles multiplier strings like "1;0" (phase1=1, phase2=0)
+        loras_list_mult_choices_nums, loras_slists, errors = parse_loras_multipliers(
+            transformer_loras_multipliers,
+            len(transformer_loras_filenames),
+            num_inference_steps,
+            nb_phases=guidance_phases,
+            model_switch_phase=model_switch_phase,
+        )
+        
+        if errors:
+            print(f"⚠️ Warning parsing LoRA multipliers: {errors}")
+        
+        print(f"   LoRAs configured: {len(transformer_loras_filenames)} LoRAs")
+        print(f"   Phase 1 multipliers: {loras_slists.get('phase1', [])}")
+        print(f"   Phase 2 multipliers: {loras_slists.get('phase2', [])}")
+        
+        return loras_slists
+        
+    except Exception as e:
+        print(f"⚠️ Failed to parse LoRA config, using empty structure: {e}")
+        return {
+            "phase1": [], "phase2": [], "phase3": [], "shared": [],
+            "model_switch_step": num_inference_steps,
+            "model_switch_step2": num_inference_steps,
+        }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GENERATION FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -890,11 +952,13 @@ def generate_video_internal(
     
     model_instance._interrupt = False
     
-    # IMPORTANT: Do NOT pass empty loras_slists - this disables critical LoRAs!
-    # For SVI2Pro and Lightning models, the LoRAs control phase-specific behavior:
-    # - Phase 1: high_noise LoRA (for initial denoising)  
-    # - Phase 2: low_noise LoRA (for refinement)
-    # Passing None lets the model use its default LoRA setup from model_def
+    # Generate proper loras_slists from model's LoRA configuration
+    # For Lightning and SVI2Pro models, this parses multipliers into phase schedules
+    loras_slists = get_loras_slists_for_model(
+        num_inference_steps=num_inference_steps,
+        guidance_phases=guidance_phases,
+        model_switch_phase=model_switch_phase,
+    )
     
     # Progress callback (required by Wan models)
     def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
@@ -932,7 +996,7 @@ def generate_video_internal(
         "seed": seed,
         "fps": float(fps),
         "VAE_tile_size": 0,
-        # loras_slists: NOT passed - let model use its internal LoRA configuration
+        "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
         "callback": video_progress_callback,
     }
     
@@ -1154,11 +1218,15 @@ def generate_video_svi2pro_internal(
     
     model_instance._interrupt = False
     
-    # IMPORTANT: Do NOT pass empty loras_slists - this disables critical SVI2Pro LoRAs!
-    # The model's internal LoRA configuration handles phase-specific LoRAs:
-    # - Phase 1: high_noise LoRA (for initial denoising)
-    # - Phase 2: low_noise LoRA (for refinement)
-    # Passing None lets the model use its default LoRA setup from model_def
+    # Generate proper loras_slists from model's LoRA configuration
+    # For SVI2Pro, this parses multipliers like ["1;0", "0;1"] into phase schedules:
+    # - Phase 1: high_noise LoRA (multiplier=1 in phase1, 0 in phase2)
+    # - Phase 2: low_noise LoRA (multiplier=0 in phase1, 1 in phase2)
+    loras_slists = get_loras_slists_for_model(
+        num_inference_steps=num_inference_steps,
+        guidance_phases=guidance_phases,
+        model_switch_phase=model_switch_phase,
+    )
     
     # Progress callback
     def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
@@ -1200,7 +1268,7 @@ def generate_video_svi2pro_internal(
         "guide_scale": guidance_scale,
         "seed": seed,
         "VAE_tile_size": 0,
-        # loras_slists: NOT passed - let model use its internal LoRA configuration
+        "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
         "callback": video_progress_callback,
     }
     
