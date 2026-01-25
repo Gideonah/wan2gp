@@ -719,16 +719,22 @@ def unload_model():
     torch.cuda.empty_cache()
 
 
-def get_loras_slists_for_model(
+def load_and_configure_loras(
     num_inference_steps: int,
     guidance_phases: int = 2,
     model_switch_phase: int = 1,
 ) -> dict:
     """
-    Generate the proper loras_slists from the model's LoRA configuration.
+    Load LoRAs into the model and return the properly configured loras_slists.
     
-    For SVI2Pro and Lightning models, this parses the loras_multipliers 
-    (e.g., ["1;0", "0;1"]) into phase-specific multiplier schedules.
+    This function does what the GUI does before generation:
+    1. Gets transformer LoRAs from model definition
+    2. Parses the multiplier strings (e.g., ["1;0", "0;1"]) into phase schedules
+    3. Loads the LoRAs into the model using offload.load_loras_into_model()
+    
+    For SVI2Pro, the LoRAs are:
+    - high_noise LoRA: multiplier "1;0" (active phase 1, inactive phase 2)
+    - low_noise LoRA: multiplier "0;1" (inactive phase 1, active phase 2)
     
     Args:
         num_inference_steps: Number of denoising steps
@@ -738,19 +744,23 @@ def get_loras_slists_for_model(
     Returns:
         dict with phase1, phase2, phase3, shared lists
     """
-    from wgp import get_transformer_loras
+    from wgp import get_transformer_loras, get_loras_preprocessor
     
     try:
         # Get LoRA filenames and multipliers from model definition
         transformer_loras_filenames, transformer_loras_multipliers = get_transformer_loras(current_model_type)
         
         if transformer_loras_filenames is None or len(transformer_loras_filenames) == 0:
-            # No LoRAs configured - return empty structure
+            print("   No LoRAs configured for this model")
             return {
                 "phase1": [], "phase2": [], "phase3": [], "shared": [],
                 "model_switch_step": num_inference_steps,
                 "model_switch_step2": num_inference_steps,
             }
+        
+        print(f"   LoRAs found: {len(transformer_loras_filenames)}")
+        for i, (fname, mult) in enumerate(zip(transformer_loras_filenames, transformer_loras_multipliers)):
+            print(f"     LoRA {i}: {Path(fname).name} (mult: {mult})")
         
         # Parse the multipliers into phase structure
         # This handles multiplier strings like "1;0" (phase1=1, phase2=0)
@@ -764,15 +774,42 @@ def get_loras_slists_for_model(
         
         if errors:
             print(f"⚠️ Warning parsing LoRA multipliers: {errors}")
+            return {
+                "phase1": [], "phase2": [], "phase3": [], "shared": [],
+                "model_switch_step": num_inference_steps,
+                "model_switch_step2": num_inference_steps,
+            }
         
-        print(f"   LoRAs configured: {len(transformer_loras_filenames)} LoRAs")
         print(f"   Phase 1 multipliers: {loras_slists.get('phase1', [])}")
         print(f"   Phase 2 multipliers: {loras_slists.get('phase2', [])}")
+        
+        # Load LoRAs into the model - this is the critical step the GUI does!
+        # Get the transformer from the model instance
+        trans = model_instance.model if hasattr(model_instance, 'model') else None
+        
+        if trans is not None:
+            split_linear_modules_map = getattr(trans, "split_linear_modules_map", None)
+            preprocess_sd = get_loras_preprocessor(trans, current_base_model_type)
+            
+            print(f"   Loading LoRAs into model...")
+            offload.load_loras_into_model(
+                trans,
+                transformer_loras_filenames,
+                loras_list_mult_choices_nums,
+                activate_all_loras=True,
+                preprocess_sd=preprocess_sd,
+                split_linear_modules_map=split_linear_modules_map,
+            )
+            print(f"   ✅ LoRAs loaded successfully")
+        else:
+            print("   ⚠️ Could not find transformer to load LoRAs into")
         
         return loras_slists
         
     except Exception as e:
-        print(f"⚠️ Failed to parse LoRA config, using empty structure: {e}")
+        import traceback
+        print(f"⚠️ Failed to load LoRAs: {e}")
+        traceback.print_exc()
         return {
             "phase1": [], "phase2": [], "phase3": [], "shared": [],
             "model_switch_step": num_inference_steps,
@@ -952,9 +989,10 @@ def generate_video_internal(
     
     model_instance._interrupt = False
     
-    # Generate proper loras_slists from model's LoRA configuration
+    # Load LoRAs and generate proper loras_slists from model's LoRA configuration
     # For Lightning and SVI2Pro models, this parses multipliers into phase schedules
-    loras_slists = get_loras_slists_for_model(
+    # AND loads the LoRAs into the model (critical step the GUI does!)
+    loras_slists = load_and_configure_loras(
         num_inference_steps=num_inference_steps,
         guidance_phases=guidance_phases,
         model_switch_phase=model_switch_phase,
@@ -1219,10 +1257,11 @@ def generate_video_svi2pro_internal(
     model_instance._interrupt = False
     
     # Generate proper loras_slists from model's LoRA configuration
-    # For SVI2Pro, this parses multipliers like ["1;0", "0;1"] into phase schedules:
+    # Load LoRAs and configure multipliers for SVI2Pro:
     # - Phase 1: high_noise LoRA (multiplier=1 in phase1, 0 in phase2)
     # - Phase 2: low_noise LoRA (multiplier=0 in phase1, 1 in phase2)
-    loras_slists = get_loras_slists_for_model(
+    # This also LOADS the LoRAs into the model - critical step!
+    loras_slists = load_and_configure_loras(
         num_inference_steps=num_inference_steps,
         guidance_phases=guidance_phases,
         model_switch_phase=model_switch_phase,
