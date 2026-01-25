@@ -760,12 +760,6 @@ def generate_image_internal(
     
     model_instance._interrupt = False
     
-    loras_slists = {
-        "phase1": [], "phase2": [], "phase3": [], "shared": [],
-        "model_switch_step": num_inference_steps,
-        "model_switch_step2": num_inference_steps,
-    }
-    
     # Progress callback (required by some models like Z-Image)
     def progress_callback(step, latents=None, force_update=False, total_steps=None, **kwargs):
         if step >= 0:
@@ -782,7 +776,7 @@ def generate_image_internal(
             guide_scale=guidance_scale,
             seed=seed,
             callback=progress_callback,
-            loras_slists=loras_slists,
+            # loras_slists: NOT passed - let model use its internal LoRA configuration
         )
         
         # Save image
@@ -896,11 +890,11 @@ def generate_video_internal(
     
     model_instance._interrupt = False
     
-    loras_slists = {
-        "phase1": [], "phase2": [], "phase3": [], "shared": [],
-        "model_switch_step": num_inference_steps,
-        "model_switch_step2": num_inference_steps,
-    }
+    # IMPORTANT: Do NOT pass empty loras_slists - this disables critical LoRAs!
+    # For SVI2Pro and Lightning models, the LoRAs control phase-specific behavior:
+    # - Phase 1: high_noise LoRA (for initial denoising)  
+    # - Phase 2: low_noise LoRA (for refinement)
+    # Passing None lets the model use its default LoRA setup from model_def
     
     # Progress callback (required by Wan models)
     def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
@@ -938,7 +932,7 @@ def generate_video_internal(
         "seed": seed,
         "fps": float(fps),
         "VAE_tile_size": 0,
-        "loras_slists": loras_slists,
+        # loras_slists: NOT passed - let model use its internal LoRA configuration
         "callback": video_progress_callback,
     }
     
@@ -1160,11 +1154,11 @@ def generate_video_svi2pro_internal(
     
     model_instance._interrupt = False
     
-    loras_slists = {
-        "phase1": [], "phase2": [], "phase3": [], "shared": [],
-        "model_switch_step": num_inference_steps,
-        "model_switch_step2": num_inference_steps,
-    }
+    # IMPORTANT: Do NOT pass empty loras_slists - this disables critical SVI2Pro LoRAs!
+    # The model's internal LoRA configuration handles phase-specific LoRAs:
+    # - Phase 1: high_noise LoRA (for initial denoising)
+    # - Phase 2: low_noise LoRA (for refinement)
+    # Passing None lets the model use its default LoRA setup from model_def
     
     # Progress callback
     def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
@@ -1206,7 +1200,7 @@ def generate_video_svi2pro_internal(
         "guide_scale": guidance_scale,
         "seed": seed,
         "VAE_tile_size": 0,
-        "loras_slists": loras_slists,
+        # loras_slists: NOT passed - let model use its internal LoRA configuration
         "callback": video_progress_callback,
     }
     
