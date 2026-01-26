@@ -328,19 +328,25 @@ RESOLUTION_PRESETS = {
         "default": (832, 480),  # GUI default resolution
         "480p": (832, 480),
         "480p_portrait": (480, 848),
+        "480_square": (480, 480),
         "720p": (1280, 720),
         "720p_portrait": (720, 1280),
+        "720_square": (720, 720),
         "576p": (1024, 576),
         "576p_portrait": (576, 1024),
+        "576_square": (576, 576),
     },
     "wan22_svi2pro": {
         "default": (832, 480),  # GUI default resolution
         "480p": (832, 480),
         "480p_portrait": (480, 848),
+        "480_square": (480, 480),
         "720p": (1280, 720),
         "720p_portrait": (720, 1280),
+        "720_square": (720, 720),
         "576p": (1024, 576),
         "576p_portrait": (576, 1024),
+        "576_square": (576, 576),
     },
     "z_image": {
         "512": (512, 512),
@@ -428,9 +434,9 @@ class Wan22ImageToVideoRequest(BaseModel):
     image_url: str = Field(..., description="URL of the input image to animate")
     duration: float = Field(5.0, ge=0.3, le=15.0, description="Video duration in seconds")
     
-    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
+    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "480_square", "720p", "720p_portrait", "720_square", "576p", "576p_portrait", "576_square"]] = Field(
         "default",
-        description="Resolution preset: default (832x480), 480p, 720p, 576p (and portrait variants)"
+        description="Resolution preset: default (832x480), 480p, 720p, 576p (portrait and square variants)"
     )
     width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
@@ -474,9 +480,9 @@ class SVI2ProImageToVideoRequest(BaseModel):
     image_url: str = Field(..., description="URL of the input image to animate")
     duration: float = Field(10.0, ge=0.3, le=120.0, description="Video duration in seconds (supports long videos via sliding window)")
     
-    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "720p", "720p_portrait", "576p", "576p_portrait"]] = Field(
+    resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "480_square", "720p", "720p_portrait", "720_square", "576p", "576p_portrait", "576_square"]] = Field(
         "default",
-        description="Resolution preset: default (832x480), 480p, 720p, 576p (and portrait variants)"
+        description="Resolution preset: default (832x480), 480p, 720p, 576p (portrait and square variants)"
     )
     width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
