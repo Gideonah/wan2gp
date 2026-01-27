@@ -97,6 +97,10 @@ if str(ROOT_DIR) not in sys.path:
 # Set environment variables before imports
 os.environ["GRADIO_LANG"] = "en"
 
+# Optimize CUDA memory allocation to reduce fragmentation
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import numpy as np
 from PIL import Image
@@ -661,6 +665,67 @@ def frames_to_duration(num_frames: int, fps: int) -> float:
     return round(num_frames / fps, 2)
 
 
+def estimate_vram_required(width: int, height: int, num_frames: int, model_family: str) -> float:
+    """
+    Estimate VRAM required for generation in GB.
+    This is a rough heuristic based on empirical testing.
+    """
+    # Base model memory (varies by model)
+    base_vram = {
+        "ltx2": 12.0,  # LTX-2 base model
+        "wan22": 14.0,  # Wan2.2 dual transformer
+        "wan22_svi2pro": 14.0,
+        "z_image": 8.0,
+    }.get(model_family, 12.0)
+    
+    # Latent space multiplier (models work in compressed latent space)
+    # LTX2: 8x spatial, 8x temporal compression
+    # Wan2.2: 8x spatial, 4x temporal compression
+    if model_family == "ltx2":
+        latent_frames = num_frames // 8
+        latent_h, latent_w = height // 8, width // 8
+    else:
+        latent_frames = num_frames // 4
+        latent_h, latent_w = height // 8, width // 8
+    
+    # Rough estimate: latents + attention maps + gradients
+    # This is very approximate - actual usage depends on many factors
+    latent_size_gb = (latent_w * latent_h * latent_frames * 16 * 4) / (1024**3)
+    
+    return base_vram + latent_size_gb * 3  # 3x for activations/gradients
+
+
+def get_gpu_memory_gb() -> tuple[float, float]:
+    """Get total and free GPU memory in GB"""
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        total = props.total_memory / (1024**3)
+        allocated = torch.cuda.memory_allocated(0) / (1024**3)
+        return total, total - allocated
+    return 0.0, 0.0
+
+
+def validate_generation_request(
+    width: int, height: int, num_frames: int, model_family: str
+) -> tuple[bool, str]:
+    """
+    Validate if a generation request is likely to succeed.
+    Returns (is_valid, warning_message).
+    """
+    total_vram, free_vram = get_gpu_memory_gb()
+    estimated_vram = estimate_vram_required(width, height, num_frames, model_family)
+    
+    # Add 20% safety margin
+    if estimated_vram > free_vram * 0.8:
+        return False, (
+            f"Request may OOM: estimated {estimated_vram:.1f}GB needed, "
+            f"only {free_vram:.1f}GB free (of {total_vram:.1f}GB total). "
+            f"Try reducing resolution or duration."
+        )
+    
+    return True, ""
+
+
 def resolve_resolution(
     model_family: str,
     resolution_preset: Optional[str] = None,
@@ -702,12 +767,38 @@ def resolve_resolution(
 
 async def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
     """Fetch an image from a URL and return as PIL Image"""
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        image_bytes = response.content
-        image = Image.open(io.BytesIO(image_bytes))
-        return image.convert("RGB")
+    # Add headers to avoid being blocked by CDNs (Discord, etc.)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+    
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout, 
+            follow_redirects=True,
+            verify=True,  # Enable SSL verification
+        ) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            image_bytes = response.content
+            
+            if len(image_bytes) == 0:
+                raise ValueError("Received empty response from image URL")
+            
+            image = Image.open(io.BytesIO(image_bytes))
+            return image.convert("RGB")
+            
+    except httpx.TimeoutException:
+        raise RuntimeError(f"Timeout fetching image (>{timeout}s)")
+    except httpx.ConnectError as e:
+        raise RuntimeError(f"Connection error: {type(e).__name__} - check if URL is accessible")
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"HTTP {e.response.status_code}: {e.response.reason_phrase}")
+    except Exception as e:
+        # Get exception type name if str(e) is empty
+        error_msg = str(e) if str(e) else f"{type(e).__name__} (no details)"
+        raise RuntimeError(f"{error_msg}")
 
 
 def decode_base64_image(image_base64: str) -> Image.Image:
@@ -1072,6 +1163,15 @@ def generate_video_internal(
         pre_video_frame_pil = image_start
         print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
     
+    # Calculate VAE tile size based on resolution and frame count
+    # Enable tiling for high-res or long videos to avoid OOM
+    # Tile size of 256 is a good balance between speed and memory
+    vae_tile_size = 0  # Default: no tiling
+    estimated_vram_gb = (width * height * num_frames * 4) / (1024**3)  # Rough estimate
+    if estimated_vram_gb > 20 or num_frames > 200 or (width >= 1280 and num_frames > 100):
+        vae_tile_size = 256
+        print(f"   Enabling VAE tiling (tile_size=256) for large generation")
+    
     # Build generation kwargs
     gen_kwargs = {
         "input_prompt": prompt,
@@ -1085,7 +1185,7 @@ def generate_video_internal(
         "guide_scale": guidance_scale,
         "seed": seed,
         "fps": float(fps),
-        "VAE_tile_size": 0,
+        "VAE_tile_size": vae_tile_size,
         "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
         "callback": video_progress_callback,
         "input_video_strength": input_video_strength,  # For LTX2: controls motion vs faithfulness to input
@@ -1667,6 +1767,12 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         
         num_frames = duration_to_frames_ltx2(request.duration)
         actual_duration = frames_to_duration(num_frames, LTX2_FPS)
+        
+        # Validate request won't OOM
+        is_valid, warning = validate_generation_request(width, height, num_frames, "ltx2")
+        if not is_valid:
+            print(f"⚠️ {warning}")
+            # Don't fail, but warn - VAE tiling may help
         
         print(f"   Using LTX-2 Dev settings:")
         print(f"   - num_inference_steps: {request.num_inference_steps}")

@@ -48,3 +48,4 @@ if __name__ == "__main__":
     print("Wan2.1 t2v model downloaded!")
 
 
+

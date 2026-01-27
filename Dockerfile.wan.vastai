@@ -160,3 +160,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
 # 2. Calls wget start_server.sh which installs vastai-sdk and runs worker.py from PYWORKER_REPO
 CMD ["/workspace/start_wan_vastai.sh"]
 
+
