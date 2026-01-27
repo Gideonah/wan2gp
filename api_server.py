@@ -1263,25 +1263,84 @@ def generate_video_internal(
         
         # Mux audio if present
         if audio_data is not None:
-            from postprocessing.mmaudio.data.av_utils import remux_with_audio
-            # Convert numpy array to torch tensor if needed
-            if isinstance(audio_data, np.ndarray):
-                audio_tensor = torch.from_numpy(audio_data)
-            else:
-                audio_tensor = audio_data
-            # Ensure audio is in (channels, samples) format for torchaudio
-            # LTX2 returns (samples, channels) so we need to transpose
-            if audio_tensor.dim() == 1:
-                # Mono audio without channel dim -> (1, samples)
-                audio_tensor = audio_tensor.unsqueeze(0)
-            elif audio_tensor.dim() == 2:
-                # If shape is (samples, channels) where samples >> channels, transpose to (channels, samples)
-                if audio_tensor.shape[0] > audio_tensor.shape[1] and audio_tensor.shape[1] in (1, 2):
-                    audio_tensor = audio_tensor.T
-            temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
-            output_path.rename(temp_video_path)
-            remux_with_audio(temp_video_path, output_path, audio_tensor, audio_sr)
-            temp_video_path.unlink(missing_ok=True)
+            try:
+                # Convert numpy array to torch tensor if needed
+                if isinstance(audio_data, np.ndarray):
+                    audio_tensor = torch.from_numpy(audio_data)
+                else:
+                    audio_tensor = audio_data
+                # Ensure audio is in (channels, samples) format for torchaudio
+                # LTX2 returns (samples, channels) so we need to transpose
+                if audio_tensor.dim() == 1:
+                    # Mono audio without channel dim -> (1, samples)
+                    audio_tensor = audio_tensor.unsqueeze(0)
+                elif audio_tensor.dim() == 2:
+                    # If shape is (samples, channels) where samples >> channels, transpose to (channels, samples)
+                    if audio_tensor.shape[0] > audio_tensor.shape[1] and audio_tensor.shape[1] in (1, 2):
+                        audio_tensor = audio_tensor.T
+                
+                # Try using ffmpeg directly first (more reliable than torchaudio)
+                temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
+                temp_audio_path = output_path.with_name(output_path.stem + '_tmp.wav')
+                output_path.rename(temp_video_path)
+                
+                try:
+                    # Save audio to temp WAV file (avoid torchcodec dependency)
+                    audio_np = audio_tensor.cpu().float().numpy()
+                    # Normalize to [-1, 1] range if needed
+                    if audio_np.max() > 1.0 or audio_np.min() < -1.0:
+                        audio_np = audio_np / max(abs(audio_np.max()), abs(audio_np.min()))
+                    
+                    # Try scipy first, then soundfile
+                    try:
+                        import scipy.io.wavfile as wavfile
+                        # scipy expects (samples, channels) for stereo, (samples,) for mono
+                        # and int16 format
+                        if audio_np.ndim == 2:
+                            audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
+                        audio_int16 = (audio_np * 32767).astype(np.int16)
+                        wavfile.write(str(temp_audio_path), audio_sr, audio_int16)
+                    except ImportError:
+                        import soundfile as sf
+                        # soundfile expects (samples, channels) for stereo
+                        if audio_np.ndim == 2:
+                            audio_np = audio_np.T
+                        sf.write(str(temp_audio_path), audio_np, audio_sr)
+                    
+                    # Use ffmpeg to mux video and audio
+                    import subprocess
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", str(temp_video_path),
+                        "-i", str(temp_audio_path),
+                        "-c:v", "copy",
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-shortest",
+                        str(output_path)
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if result.returncode != 0:
+                        raise RuntimeError(f"ffmpeg failed: {result.stderr}")
+                    print("   ✅ Audio muxed with ffmpeg")
+                    
+                except Exception as ffmpeg_err:
+                    print(f"   ⚠️ ffmpeg muxing failed: {ffmpeg_err}")
+                    # Fall back to torchaudio/remux_with_audio
+                    from postprocessing.mmaudio.data.av_utils import remux_with_audio
+                    remux_with_audio(temp_video_path, output_path, audio_tensor, audio_sr)
+                    print("   ✅ Audio muxed with torchaudio")
+                
+                finally:
+                    temp_video_path.unlink(missing_ok=True)
+                    temp_audio_path.unlink(missing_ok=True)
+                    
+            except Exception as audio_err:
+                print(f"   ⚠️ Audio muxing failed, saving video without audio: {audio_err}")
+                # If we renamed the file, rename it back
+                temp_video_path = output_path.with_name(output_path.stem + '_tmp.mp4')
+                if temp_video_path.exists() and not output_path.exists():
+                    temp_video_path.rename(output_path)
         
     except Exception as e:
         traceback.print_exc()
