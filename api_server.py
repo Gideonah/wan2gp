@@ -43,7 +43,7 @@ def parse_api_args():
     parser = argparse.ArgumentParser(description="Wan2GP API Server", add_help=False)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model-type", type=str, default=os.environ.get("WAN2GP_MODEL_TYPE", "ltx2_distilled"))
+    parser.add_argument("--model-type", type=str, default=os.environ.get("WAN2GP_MODEL_TYPE", "ltx2_19B"))
     parser.add_argument("--profile", type=int, default=int(os.environ.get("WAN2GP_PROFILE", "3")))
     parser.add_argument("--reload", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
@@ -110,6 +110,47 @@ import uvicorn
 from mmgp import offload
 from shared.utils.audio_video import save_video
 from shared.utils.loras_mutipliers import parse_loras_multipliers
+from shared.attention import get_attention_modes, get_supported_attention_modes
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ATTENTION MODE DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_best_attention_mode() -> str:
+    """
+    Detect the best available attention mode, preferring sage2.
+    Returns the attention mode to use and logs the result.
+    """
+    installed = get_attention_modes()
+    supported = get_supported_attention_modes()
+    
+    print("🔍 Detecting attention mode...")
+    print(f"   Installed attention modes: {installed}")
+    print(f"   Supported attention modes: {supported}")
+    
+    # Try sage2 first (best performance)
+    if "sage2" in supported:
+        print("✅ Using SageAttention 2 (sage2) - best performance")
+        return "sage2"
+    elif "sage2" in installed:
+        print("⚠️  SageAttention 2 is installed but NOT supported on this GPU")
+    
+    # Try sage (original SageAttention)
+    if "sage" in supported:
+        print("✅ Using SageAttention 1 (sage)")
+        return "sage"
+    
+    # Try flash attention
+    if "flash" in supported:
+        print("✅ Using Flash Attention")
+        return "flash"
+    
+    # Fallback to SDPA (always available)
+    print("⚠️  Falling back to SDPA attention (default PyTorch)")
+    return "sdpa"
+
+# Detect attention mode at import time
+DETECTED_ATTENTION_MODE = detect_best_attention_mode()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -413,6 +454,8 @@ class LTX2ImageToVideoRequest(BaseModel):
     height: Optional[int] = Field(None, description="Video height (must be multiple of 64)")
     
     guidance_scale: float = Field(4.0, ge=1.0, le=10.0, description="Classifier-free guidance scale")
+    input_video_strength: float = Field(1.0, ge=0.0, le=1.0, description="Image/source video strength (lower values = more motion, 1.0 = faithful to input)")
+    num_inference_steps: int = Field(40, ge=8, le=100, description="Number of inference steps (40 for dev model with LoRA)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     
     class Config:
@@ -423,6 +466,8 @@ class LTX2ImageToVideoRequest(BaseModel):
                 "duration": 5.0,
                 "resolution_preset": "720p",
                 "guidance_scale": 4.0,
+                "input_video_strength": 1.0,
+                "num_inference_steps": 40,
                 "seed": -1
             }
         }
@@ -855,8 +900,8 @@ def generate_image_internal(
     
     start_time = time.time()
     
-    # Set up offload shared state
-    offload.shared_state["_attention"] = "sdpa"
+    # Set up offload shared state - use detected attention mode
+    offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
     offload.shared_state["_nag_scale"] = 1.0
@@ -961,6 +1006,7 @@ def generate_video_internal(
     model_switch_phase: int = 1,
     switch_threshold: int = 0,
     flow_shift: Optional[float] = None,
+    input_video_strength: float = 1.0,
     seed: int = -1,
     fps: int = 24,
 ) -> tuple[str, float, dict]:
@@ -985,8 +1031,8 @@ def generate_video_internal(
     
     start_time = time.time()
     
-    # Set up offload shared state
-    offload.shared_state["_attention"] = "sdpa"
+    # Set up offload shared state - use detected attention mode
+    offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
     offload.shared_state["_nag_scale"] = 1.0
@@ -1042,6 +1088,7 @@ def generate_video_internal(
         "VAE_tile_size": 0,
         "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
         "callback": video_progress_callback,
+        "input_video_strength": input_video_strength,  # For LTX2: controls motion vs faithfulness to input
     }
     
     # For Wan2.2 i2v models, pass the image as input_video (required for i2v_class flow)
@@ -1252,8 +1299,8 @@ def generate_video_svi2pro_internal(
     
     start_time = time.time()
     
-    # Set up offload shared state
-    offload.shared_state["_attention"] = "sdpa"
+    # Set up offload shared state - use detected attention mode
+    offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
     offload.shared_state["_nag_scale"] = 1.0
@@ -1621,14 +1668,21 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         num_frames = duration_to_frames_ltx2(request.duration)
         actual_duration = frames_to_duration(num_frames, LTX2_FPS)
         
+        print(f"   Using LTX-2 Dev settings:")
+        print(f"   - num_inference_steps: {request.num_inference_steps}")
+        print(f"   - input_video_strength: {request.input_video_strength}")
+        print(f"   - guidance_scale: {request.guidance_scale}")
+        print(f"   - attention_mode: {DETECTED_ATTENTION_MODE}")
+        
         output_path, gen_time, metadata = generate_video_internal(
             prompt=request.prompt,
             image_start=image_start,
             width=width,
             height=height,
             num_frames=num_frames,
-            num_inference_steps=8,  # LTX-2 distilled uses 8 steps
+            num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
+            input_video_strength=request.input_video_strength,
             seed=request.seed,
             fps=LTX2_FPS,
         )

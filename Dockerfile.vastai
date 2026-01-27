@@ -1,10 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# LTX-2 Distilled Video Generation for Vast.ai Serverless
+# LTX-2 Dev 19B Video Generation for Vast.ai Serverless
 # 
 # This Dockerfile creates an image optimized for Vast.ai deployment:
 #   - Models downloaded at RUNTIME (smaller image, ~8GB)
+#   - Uses LTX-2 Dev model with distilled LoRA for faster inference
 #   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
-#   - No LoRAs downloaded
 #   - STANDARD Vast.ai PyWorker integration via start_server.sh
 #
 # BUILD PROCESS (run on a GPU machine for SageAttention):
@@ -19,7 +19,7 @@
 #     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
 #     PYWORKER_REF: main (optional, defaults to main)
 #
-# NOTE: First startup will download model weights (~15GB for LTX-2 distilled FP8).
+# NOTE: First startup will download model weights (~15GB for LTX-2 dev FP8 + LoRA).
 #       Mount a persistent volume to /workspace/ckpts for faster restarts.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -93,11 +93,11 @@ with open('setup.py', 'w') as f:
     f.write(content)
 EOF
 
-RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
-    cd /tmp/sageattention && \
+RUN git clone https://github.com/thu-ml/SageAttention.git && \
+    cd SageAttention && \
     python3 /tmp/patch_setup.py && \
-    pip install --no-build-isolation . && \
-    rm -rf /tmp/sageattention /tmp/patch_setup.py /root/.cache/* || \
+    EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=32 python3 setup.py install && \
+    cd .. && rm -rf SageAttention /tmp/patch_setup.py /root/.cache/* || \
     echo "⚠️  SageAttention skipped (no CUDA during build)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,8 +119,8 @@ RUN chmod +x /workspace/start_vastai.sh /workspace/start_pyworker.sh /workspace/
 # HuggingFace cache location
 ENV HF_HOME=/workspace/.cache/huggingface
 
-# Model configuration (LTX-2 Distilled)
-ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
+# Model configuration (LTX-2 Dev 19B with distilled LoRA)
+ENV WAN2GP_MODEL_TYPE="ltx2_19B"
 ENV WAN2GP_PROFILE="3"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 
