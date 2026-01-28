@@ -100,7 +100,9 @@ ENV HF_HOME=/workspace/.cache/huggingface
 
 # Model configuration (LTX-2 Dev 19B with distilled LoRA - 40 steps)
 ENV WAN2GP_MODEL_TYPE="ltx2_19B"
-ENV WAN2GP_PROFILE="3"
+# Profile 5 keeps models in VRAM, avoiding quanto tensor swapping bug in mmgp <3.7.2
+# Requires sufficient VRAM (~24GB+). Use profile 3 after upgrading to mmgp>=3.7.2
+ENV WAN2GP_PROFILE="5"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 
 # Backend API server port (internal)

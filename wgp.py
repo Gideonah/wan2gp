@@ -94,11 +94,16 @@ image_names_list = ["image_start", "image_end", "image_refs"]
 ATTACHMENT_KEYS = ["image_start", "image_end", "image_refs", "image_guide", "image_mask",
                    "video_guide",  "video_mask", "video_source", "audio_guide", "audio_guide2", "audio_source", "custom_guide"]
 
-from importlib.metadata import version
-mmgp_version = version("mmgp")
-if mmgp_version != target_mmgp_version:
-    print(f"Incorrect version of mmgp ({mmgp_version}), version {target_mmgp_version} is needed. Please upgrade with the command 'pip install -r requirements.txt'")
+from importlib.metadata import version as get_version
+mmgp_version = get_version("mmgp")
+# Allow same major.minor version (e.g., 3.7.0, 3.7.2 both OK)
+mmgp_major_minor = ".".join(mmgp_version.split(".")[:2])
+target_major_minor = ".".join(target_mmgp_version.split(".")[:2])
+if mmgp_major_minor != target_major_minor:
+    print(f"⚠️ mmgp version {mmgp_version} incompatible with required {target_mmgp_version}. Please run 'pip install -r requirements.txt'")
     exit()
+elif mmgp_version != target_mmgp_version:
+    print(f"ℹ️  mmgp version {mmgp_version} (target: {target_mmgp_version}) - compatible version OK")
 lock = threading.Lock()
 current_task_id = None
 task_id = 0
