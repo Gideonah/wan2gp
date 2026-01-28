@@ -98,8 +98,8 @@ RUN chmod +x /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/nu
     # HuggingFace cache (models downloaded at runtime)
 ENV HF_HOME=/workspace/.cache/huggingface
 
-# Model configuration (LTX-2 Distilled)
-ENV WAN2GP_MODEL_TYPE="ltx2_distilled"
+# Model configuration (LTX-2 Dev 19B with distilled LoRA - 40 steps)
+ENV WAN2GP_MODEL_TYPE="ltx2_19B"
 ENV WAN2GP_PROFILE="3"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 

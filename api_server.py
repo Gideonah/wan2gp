@@ -889,9 +889,11 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
         print(f"   ⚠️ LoRA download check failed: {e}")
         traceback.print_exc()
     
-    # Pre-load LoRAs at startup for faster first generation
-    print("⏳ Pre-loading LoRAs...")
-    load_and_configure_loras(num_inference_steps=40, guidance_phases=1, model_switch_phase=1)
+    # NOTE: LoRAs are loaded on first generation, not at startup
+    # This matches the GUI behavior where LoRAs are loaded after MMGP fully hooks the model
+    # Attempting to load LoRAs here causes "unexpected module keys" warnings because
+    # MMGP hasn't finished initializing the transformer's state dictionary yet
+    print("   ℹ️  LoRAs will be loaded on first generation (matching GUI behavior)")
     
     return model_instance
 
