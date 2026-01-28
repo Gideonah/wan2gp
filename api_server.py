@@ -411,6 +411,7 @@ current_model_type = None
 current_base_model_type = None
 current_model_family = None
 offloadobj = None
+loras_loaded = False  # Track if LoRAs have been loaded
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PYDANTIC MODELS
@@ -816,7 +817,7 @@ def decode_base64_image(image_base64: str) -> Image.Image:
 
 def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAULT_PROFILE):
     """Load the Wan2GP model into VRAM"""
-    global model_instance, model_handler, model_def, current_model_type, current_model_family, current_base_model_type, offloadobj
+    global model_instance, model_handler, model_def, current_model_type, current_model_family, current_base_model_type, offloadobj, loras_loaded
     
     print(f"⏳ Loading model: {model_type} (profile: {profile})...")
     start_time = time.time()
@@ -836,6 +837,7 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
     current_model_type = model_type
     current_base_model_type = base_model_type  # Store base model type for generate()
     current_model_family = get_model_family(model_type)
+    loras_loaded = False  # Reset LoRA state for new model
     
     load_time = time.time() - start_time
     print(f"✅ Model loaded in {load_time:.1f}s (family: {current_model_family}, base: {base_model_type})")
@@ -845,18 +847,23 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
         print(f"   GPU: {props.name}")
         print(f"   VRAM: {props.total_memory // 1024 // 1024}MB")
     
+    # Pre-load LoRAs at startup for faster first generation
+    print("⏳ Pre-loading LoRAs...")
+    load_and_configure_loras(num_inference_steps=40, guidance_phases=1, model_switch_phase=1)
+    
     return model_instance
 
 
 def unload_model():
     """Release model from memory"""
-    global model_instance, offloadobj
+    global model_instance, offloadobj, loras_loaded
     
     if offloadobj is not None:
         offloadobj.release()
         offloadobj = None
     
     model_instance = None
+    loras_loaded = False  # Reset LoRA state
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -865,6 +872,7 @@ def load_and_configure_loras(
     num_inference_steps: int,
     guidance_phases: int = 2,
     model_switch_phase: int = 1,
+    force_reload: bool = False,
 ) -> dict:
     """
     Load LoRAs into the model and return the properly configured loras_slists.
@@ -874,18 +882,18 @@ def load_and_configure_loras(
     2. Parses the multiplier strings (e.g., ["1;0", "0;1"]) into phase schedules
     3. Loads the LoRAs into the model using offload.load_loras_into_model()
     
-    For SVI2Pro, the LoRAs are:
-    - high_noise LoRA: multiplier "1;0" (active phase 1, inactive phase 2)
-    - low_noise LoRA: multiplier "0;1" (inactive phase 1, active phase 2)
+    LoRAs are only loaded once per model load (unless force_reload=True).
     
     Args:
         num_inference_steps: Number of denoising steps
         guidance_phases: Number of guidance phases (1-3)
         model_switch_phase: Phase at which to switch models
+        force_reload: Force reload LoRAs even if already loaded
         
     Returns:
         dict with phase1, phase2, phase3, shared lists
     """
+    global loras_loaded
     from wgp import get_transformer_loras, get_loras_preprocessor
     
     try:
@@ -899,10 +907,6 @@ def load_and_configure_loras(
                 "model_switch_step": num_inference_steps,
                 "model_switch_step2": num_inference_steps,
             }
-        
-        print(f"   LoRAs found: {len(transformer_loras_filenames)}")
-        for i, (fname, mult) in enumerate(zip(transformer_loras_filenames, transformer_loras_multipliers)):
-            print(f"     LoRA {i}: {Path(fname).name} (mult: {mult})")
         
         # Parse the multipliers into phase structure
         # This handles multiplier strings like "1;0" (phase1=1, phase2=0)
@@ -922,29 +926,35 @@ def load_and_configure_loras(
                 "model_switch_step2": num_inference_steps,
             }
         
-        print(f"   Phase 1 multipliers: {loras_slists.get('phase1', [])}")
-        print(f"   Phase 2 multipliers: {loras_slists.get('phase2', [])}")
-        
-        # Load LoRAs into the model - this is the critical step the GUI does!
-        # Get the transformer from the model instance
-        trans = model_instance.model if hasattr(model_instance, 'model') else None
-        
-        if trans is not None:
-            split_linear_modules_map = getattr(trans, "split_linear_modules_map", None)
-            preprocess_sd = get_loras_preprocessor(trans, current_base_model_type)
+        # Only load LoRAs if not already loaded (or force reload)
+        if not loras_loaded or force_reload:
+            print(f"   LoRAs found: {len(transformer_loras_filenames)}")
+            for i, (fname, mult) in enumerate(zip(transformer_loras_filenames, transformer_loras_multipliers)):
+                print(f"     LoRA {i}: {Path(fname).name} (mult: {mult})")
             
-            print(f"   Loading LoRAs into model...")
-            offload.load_loras_into_model(
-                trans,
-                transformer_loras_filenames,
-                loras_list_mult_choices_nums,
-                activate_all_loras=True,
-                preprocess_sd=preprocess_sd,
-                split_linear_modules_map=split_linear_modules_map,
-            )
-            print(f"   ✅ LoRAs loaded successfully")
-        else:
-            print("   ⚠️ Could not find transformer to load LoRAs into")
+            print(f"   Phase 1 multipliers: {loras_slists.get('phase1', [])}")
+            print(f"   Phase 2 multipliers: {loras_slists.get('phase2', [])}")
+            
+            # Load LoRAs into the model - this is the critical step the GUI does!
+            trans = model_instance.model if hasattr(model_instance, 'model') else None
+            
+            if trans is not None:
+                split_linear_modules_map = getattr(trans, "split_linear_modules_map", None)
+                preprocess_sd = get_loras_preprocessor(trans, current_base_model_type)
+                
+                print(f"   Loading LoRAs into model...")
+                offload.load_loras_into_model(
+                    trans,
+                    transformer_loras_filenames,
+                    loras_list_mult_choices_nums,
+                    activate_all_loras=True,
+                    preprocess_sd=preprocess_sd,
+                    split_linear_modules_map=split_linear_modules_map,
+                )
+                print(f"   ✅ LoRAs loaded successfully")
+                loras_loaded = True
+            else:
+                print("   ⚠️ Could not find transformer to load LoRAs into")
         
         return loras_slists
         
@@ -1117,10 +1127,12 @@ def generate_video_internal(
     print(f"🎬 Generating video: {prompt[:50]}...")
     print(f"   Resolution: {width}x{height}, Frames: {num_frames}, Steps: {num_inference_steps}")
     print(f"   Duration: {frames_to_duration(num_frames, fps)}s @ {fps}fps")
+    print(f"   Attention mode: {DETECTED_ATTENTION_MODE}")
     if image_start is not None:
         print(f"   Input image: {image_start.size[0]}x{image_start.size[1]}")
     
     start_time = time.time()
+    timing_log = []
     
     # Set up offload shared state - use detected attention mode
     offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
@@ -1135,11 +1147,13 @@ def generate_video_internal(
     # Load LoRAs and generate proper loras_slists from model's LoRA configuration
     # For Lightning and SVI2Pro models, this parses multipliers into phase schedules
     # AND loads the LoRAs into the model (critical step the GUI does!)
+    t0 = time.time()
     loras_slists = load_and_configure_loras(
         num_inference_steps=num_inference_steps,
         guidance_phases=guidance_phases,
         model_switch_phase=model_switch_phase,
     )
+    timing_log.append(f"LoRA config: {time.time()-t0:.1f}s")
     
     # Progress callback (required by Wan models)
     def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
@@ -1164,11 +1178,10 @@ def generate_video_internal(
         print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
     
     # Calculate VAE tile size based on resolution and frame count
-    # Enable tiling for high-res or long videos to avoid OOM
-    # Tile size of 256 is a good balance between speed and memory
-    vae_tile_size = 0  # Default: no tiling
-    estimated_vram_gb = (width * height * num_frames * 4) / (1024**3)  # Rough estimate
-    if estimated_vram_gb > 20 or num_frames > 200 or (width >= 1280 and num_frames > 100):
+    # Enable tiling only for very large generations to avoid OOM
+    # Tiling adds overhead so only use when necessary
+    vae_tile_size = 0  # Default: no tiling (faster)
+    if num_frames > 300 or (width >= 1280 and num_frames > 200):
         vae_tile_size = 256
         print(f"   Enabling VAE tiling (tile_size=256) for large generation")
     
@@ -1246,9 +1259,12 @@ def generate_video_internal(
             object.__setattr__(model_instance.model2, 'cache', None)
             print(f"   Set model2.cache = None")
         
+        t_gen = time.time()
         result = model_instance.generate(**gen_kwargs)
+        timing_log.append(f"model.generate(): {time.time()-t_gen:.1f}s")
         
         # Extract video tensor and audio
+        t_post = time.time()
         if isinstance(result, dict):
             video_tensor = result.get("x", result)
             audio_data = result.get("audio", None)
@@ -1260,6 +1276,7 @@ def generate_video_internal(
         
         # Save video (without audio first)
         save_video(video_tensor, str(output_path), fps=fps)
+        timing_log.append(f"save_video: {time.time()-t_post:.1f}s")
         
         # Mux audio if present
         if audio_data is not None:
@@ -1351,6 +1368,7 @@ def generate_video_internal(
     
     generation_time = time.time() - start_time
     print(f"✅ Video saved to {output_path} in {generation_time:.1f}s")
+    print(f"   Timing breakdown: {' | '.join(timing_log)}")
     
     metadata = {
         "num_frames": num_frames,
