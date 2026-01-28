@@ -979,23 +979,43 @@ def load_and_configure_loras(
             print(f"   Phase 1 multipliers: {loras_slists.get('phase1', [])}")
             print(f"   Phase 2 multipliers: {loras_slists.get('phase2', [])}")
             
-            # Load LoRAs into the model - this is the critical step the GUI does!
-            trans = model_instance.model if hasattr(model_instance, 'model') else None
+            # Load LoRAs into the model - use get_trans_lora() like the GUI does!
+            # This returns the correct transformer object for LoRA loading
+            if hasattr(model_instance, "get_trans_lora"):
+                trans_lora, trans2_lora = model_instance.get_trans_lora()
+            else:
+                trans_lora = model_instance.model if hasattr(model_instance, 'model') else None
+                trans2_lora = None
             
-            if trans is not None:
-                split_linear_modules_map = getattr(trans, "split_linear_modules_map", None)
-                preprocess_sd = get_loras_preprocessor(trans, current_base_model_type)
+            if trans_lora is not None:
+                # Use trans_lora for preprocessing target (matching GUI at wgp.py line 5446)
+                preprocess_target = trans_lora
+                split_linear_modules_map = getattr(preprocess_target, "split_linear_modules_map", None)
+                preprocess_sd = get_loras_preprocessor(preprocess_target, current_base_model_type)
                 
-                print(f"   Loading LoRAs into model...")
+                print(f"   Loading LoRAs into model (via get_trans_lora)...")
                 offload.load_loras_into_model(
-                    trans,
+                    trans_lora,
                     transformer_loras_filenames,
                     loras_list_mult_choices_nums,
                     activate_all_loras=True,
                     preprocess_sd=preprocess_sd,
                     split_linear_modules_map=split_linear_modules_map,
                 )
-                print(f"   ✅ LoRAs loaded successfully")
+                
+                # Check for LoRA loading errors (matching GUI at wgp.py line 5458)
+                lora_errors = getattr(trans_lora, "_loras_errors", [])
+                if lora_errors:
+                    error_files = [msg for _, msg in lora_errors]
+                    print(f"   ⚠️ LoRA loading warnings: {error_files}")
+                else:
+                    print(f"   ✅ LoRAs loaded successfully")
+                
+                # Sync LoRAs to second transformer if present (matching GUI at wgp.py line 5463)
+                if trans2_lora is not None:
+                    offload.sync_models_loras(trans_lora, trans2_lora)
+                    print(f"   ✅ LoRAs synced to trans2")
+                
                 loras_loaded = True
             else:
                 print("   ⚠️ Could not find transformer to load LoRAs into")
