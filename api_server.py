@@ -850,20 +850,44 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
     # Ensure model LoRAs are downloaded
     print("⏳ Checking/downloading model LoRAs...")
     try:
-        from wgp import get_model_recursive_prop, get_lora_dir, download_file
+        from wgp import get_model_recursive_prop, get_lora_dir, download_file, get_model_def
         import os
+        
+        # Debug: check what the model definition contains
+        mdef = get_model_def(model_type)
+        if mdef:
+            print(f"   Model def keys: {list(mdef.keys())[:10]}...")
+            if "loras" in mdef:
+                print(f"   Found loras in model_def: {mdef['loras']}")
+        
         model_loras = get_model_recursive_prop(model_type, "loras", return_list=True)
-        lora_dir = get_lora_dir(model_type)
-        os.makedirs(lora_dir, exist_ok=True)
-        for url in model_loras:
-            filename = os.path.join(lora_dir, url.split("/")[-1])
-            if not os.path.isfile(filename):
-                if url.startswith("http"):
-                    print(f"   Downloading LoRA: {os.path.basename(filename)}")
-                    download_file(url, filename)
-                    print(f"   ✅ Downloaded {os.path.basename(filename)}")
+        print(f"   get_model_recursive_prop('loras') returned: {model_loras}")
+        
+        if not model_loras:
+            # Fallback: check model_def directly
+            if mdef and "loras" in mdef:
+                model_loras = mdef["loras"]
+                print(f"   Using loras from model_def directly: {model_loras}")
+        
+        if model_loras:
+            lora_dir = get_lora_dir(model_type)
+            os.makedirs(lora_dir, exist_ok=True)
+            print(f"   LoRA dir: {lora_dir}")
+            for url in model_loras:
+                filename = os.path.join(lora_dir, url.split("/")[-1])
+                if not os.path.isfile(filename):
+                    if url.startswith("http"):
+                        print(f"   Downloading LoRA: {os.path.basename(filename)}")
+                        download_file(url, filename)
+                        print(f"   ✅ Downloaded {os.path.basename(filename)}")
+                else:
+                    print(f"   LoRA already exists: {os.path.basename(filename)}")
+        else:
+            print(f"   No LoRAs found in model definition")
     except Exception as e:
+        import traceback
         print(f"   ⚠️ LoRA download check failed: {e}")
+        traceback.print_exc()
     
     # Pre-load LoRAs at startup for faster first generation
     print("⏳ Pre-loading LoRAs...")
