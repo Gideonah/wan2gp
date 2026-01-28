@@ -847,6 +847,24 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
         print(f"   GPU: {props.name}")
         print(f"   VRAM: {props.total_memory // 1024 // 1024}MB")
     
+    # Ensure model LoRAs are downloaded
+    print("⏳ Checking/downloading model LoRAs...")
+    try:
+        from wgp import get_model_recursive_prop, get_lora_dir, download_file
+        import os
+        model_loras = get_model_recursive_prop(model_type, "loras", return_list=True)
+        lora_dir = get_lora_dir(model_type)
+        os.makedirs(lora_dir, exist_ok=True)
+        for url in model_loras:
+            filename = os.path.join(lora_dir, url.split("/")[-1])
+            if not os.path.isfile(filename):
+                if url.startswith("http"):
+                    print(f"   Downloading LoRA: {os.path.basename(filename)}")
+                    download_file(url, filename)
+                    print(f"   ✅ Downloaded {os.path.basename(filename)}")
+    except Exception as e:
+        print(f"   ⚠️ LoRA download check failed: {e}")
+    
     # Pre-load LoRAs at startup for faster first generation
     print("⏳ Pre-loading LoRAs...")
     load_and_configure_loras(num_inference_steps=40, guidance_phases=1, model_switch_phase=1)
