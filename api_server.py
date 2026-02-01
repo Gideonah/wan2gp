@@ -506,7 +506,7 @@ class Wan22ImageToVideoRequest(BaseModel):
     sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
     sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows")
     color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows")
-    temporal_upsampling: Optional[Literal["rife2", "rife4"]] = Field(None, description="RIFE temporal upsampling (doubles/quadruples fps)")
+    temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field("rife2", description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)")
     
     class Config:
         json_schema_extra = {
@@ -515,6 +515,7 @@ class Wan22ImageToVideoRequest(BaseModel):
                 "image_url": "https://example.com/portrait.jpg",
                 "duration": 5.0,
                 "resolution_preset": "default",
+                "temporal_upsampling": "rife2",
                 "seed": -1
             }
         }
@@ -1559,6 +1560,35 @@ def generate_video_internal(
     return str(output_path), generation_time, metadata
 
 
+def download_flownet_if_needed() -> str:
+    """
+    Download flownet.pkl (RIFE model) if not present.
+    Returns the path to flownet.pkl.
+    """
+    from shared.utils import files_locator as fl
+    from huggingface_hub import hf_hub_download
+    
+    # Check if already exists
+    flownet_path = fl.locate_file("flownet.pkl", error_if_none=False)
+    if flownet_path is not None:
+        return flownet_path
+    
+    # Download from HuggingFace
+    print("📥 Downloading flownet.pkl (RIFE model)...")
+    download_dir = fl.get_download_location()
+    
+    hf_hub_download(
+        repo_id="DeepBeepMeep/Wan2.1",
+        filename="flownet.pkl",
+        local_dir=download_dir
+    )
+    
+    # Verify download
+    flownet_path = fl.locate_file("flownet.pkl", error_if_none=True)
+    print(f"✅ Downloaded flownet.pkl to {flownet_path}")
+    return flownet_path
+
+
 def perform_rife_upsampling(sample: torch.Tensor, temporal_upsampling: str, fps: int) -> tuple:
     """
     Apply RIFE temporal upsampling to video tensor.
@@ -1582,10 +1612,9 @@ def perform_rife_upsampling(sample: torch.Tensor, temporal_upsampling: str, fps:
     
     try:
         from postprocessing.rife.inference import temporal_interpolation
-        from shared.utils import files_locator as fl
         
-        # Use the same model path resolution as wgp.py
-        rife_model_path = fl.locate_file("flownet.pkl")
+        # Download flownet.pkl if needed, then get path
+        rife_model_path = download_flownet_if_needed()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # temporal_interpolation(model_path, frames, exp, device)
