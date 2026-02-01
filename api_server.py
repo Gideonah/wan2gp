@@ -1652,7 +1652,9 @@ def generate_video_sliding_window_internal(
     # Calculate number of windows needed
     # First window generates sliding_window_size frames
     # Each subsequent window adds (sliding_window_size - overlap) new frames
-    reuse_frames = sliding_window_overlap * latent_size  # Convert latent overlap to frame overlap
+    # GUI: reuse_frames = min(sliding_window_size - latent_size, sliding_window_overlap)
+    # sliding_window_overlap is in video frames (typically 4), NOT latent frames
+    reuse_frames = min(sliding_window_size - latent_size, sliding_window_overlap)
     frames_per_subsequent_window = sliding_window_size - reuse_frames
     
     if num_frames <= sliding_window_size:
