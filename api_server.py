@@ -482,7 +482,7 @@ class Wan22ImageToVideoRequest(BaseModel):
     """Request model for Wan2.2 I2V Lightning v2 generation"""
     prompt: str = Field(..., description="Text prompt describing the video (supports temporal markers)")
     image_url: str = Field(..., description="URL of the input image to animate")
-    duration: float = Field(5.0, ge=0.3, le=15.0, description="Video duration in seconds")
+    duration: float = Field(5.0, ge=0.3, le=30.0, description="Video duration in seconds (up to 30s with sliding window)")
     
     resolution_preset: Optional[Literal["default", "480p", "480p_portrait", "480_square", "720p", "720p_portrait", "720_square", "576p", "576p_portrait", "576_square"]] = Field(
         "default",
@@ -500,6 +500,13 @@ class Wan22ImageToVideoRequest(BaseModel):
     switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning v2)")
     flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning v2)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
+    
+    # Optional sliding window parameters (auto-enabled for duration > 5s)
+    use_sliding_window: Optional[bool] = Field(None, description="Enable sliding window for long videos (auto-enabled if duration > 5s)")
+    sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
+    sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows")
+    color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows")
+    temporal_upsampling: Optional[Literal["rife2", "rife4"]] = Field(None, description="RIFE temporal upsampling (doubles/quadruples fps)")
     
     class Config:
         json_schema_extra = {
@@ -1695,12 +1702,8 @@ def generate_video_svi2pro_internal(
         pre_video_frame_pil = image_start
         print(f"   image_start_tensor: {image_start_tensor.shape}, input_video: {input_video_tensor.shape}, dtype: {input_video_tensor.dtype}")
     
-    # Calculate VAE_tile_size dynamically based on resolution/frames (like GUI does)
-    # Use tiling for large generations to prevent OOM
-    vae_tile_size = 0  # Default: no tiling (faster)
-    if num_frames > 200 or (width >= 1280 and num_frames > 120):
-        vae_tile_size = 256
-        print(f"   Enabling VAE tiling (tile_size=256) for large generation")
+    # VAE_tile_size = 0 means no tiling (faster, uses more VRAM)
+    vae_tile_size = 0
     
     # Build generation kwargs - match wgp.py wan_model.generate() call (lines 6034-6123)
     gen_kwargs = {
@@ -2153,30 +2156,87 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         print(f"   Resized image: {original_size} -> {image_start.size} (cover mode)")
         
         num_frames = duration_to_frames_wan22(request.duration)
-        actual_duration = frames_to_duration(num_frames, WAN22_FPS)
+        base_fps = WAN22_FPS
         
-        print(f"   Using Enhanced Lightning v2 settings:")
-        print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
-        print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
-        print(f"   - switch_threshold: {request.switch_threshold}")
-        print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
+        # Determine if we should use sliding window
+        # Auto-enable for videos > 5 seconds (81 frames), or if explicitly requested
+        use_sliding_window = request.use_sliding_window
+        if use_sliding_window is None:
+            use_sliding_window = request.duration > 5.0 or request.temporal_upsampling is not None
         
-        output_path, gen_time, metadata = generate_video_internal(
-            prompt=request.prompt,
-            image_start=image_start,
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            num_inference_steps=request.num_inference_steps,
-            guidance_scale=request.guidance_scale,
-            guidance2_scale=request.guidance2_scale,
-            guidance_phases=request.guidance_phases,
-            model_switch_phase=request.model_switch_phase,
-            switch_threshold=request.switch_threshold,
-            flow_shift=request.flow_shift,
-            seed=request.seed,
-            fps=WAN22_FPS,
-        )
+        if use_sliding_window:
+            # Use sliding window generation for long videos
+            print(f"   Using Enhanced Lightning v2 with SLIDING WINDOW:")
+            print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
+            print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
+            print(f"   - switch_threshold: {request.switch_threshold}")
+            print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
+            print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}")
+            print(f"   - color_correction: {request.color_correction_strength}, temporal_upsampling: {request.temporal_upsampling}")
+            
+            # Calculate output fps based on temporal upsampling
+            if request.temporal_upsampling == "rife2":
+                output_fps = base_fps * 2
+            elif request.temporal_upsampling == "rife4":
+                output_fps = base_fps * 4
+            else:
+                output_fps = base_fps
+            
+            output_path, gen_time, metadata = generate_video_svi2pro_internal(
+                prompt=request.prompt,
+                image_start=image_start,
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                guidance2_scale=request.guidance2_scale,
+                guidance_phases=request.guidance_phases,
+                model_switch_phase=request.model_switch_phase,
+                switch_threshold=request.switch_threshold,
+                flow_shift=request.flow_shift,
+                seed=request.seed,
+                fps=base_fps,
+                sliding_window_size=request.sliding_window_size,
+                sliding_window_overlap=request.sliding_window_overlap,
+                color_correction_strength=request.color_correction_strength,
+                temporal_upsampling=request.temporal_upsampling or "",
+            )
+            actual_duration = frames_to_duration(num_frames, base_fps)
+            
+            # Account for RIFE upsampling in output frame count
+            output_num_frames = num_frames
+            if request.temporal_upsampling == "rife2":
+                output_num_frames = num_frames * 2 - 1
+            elif request.temporal_upsampling == "rife4":
+                output_num_frames = num_frames * 4 - 3
+        else:
+            # Use single-pass generation for short videos
+            actual_duration = frames_to_duration(num_frames, WAN22_FPS)
+            
+            print(f"   Using Enhanced Lightning v2 settings:")
+            print(f"   - guidance_phases: {request.guidance_phases}, model_switch_phase: {request.model_switch_phase}")
+            print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
+            print(f"   - switch_threshold: {request.switch_threshold}")
+            print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
+            
+            output_path, gen_time, metadata = generate_video_internal(
+                prompt=request.prompt,
+                image_start=image_start,
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                guidance2_scale=request.guidance2_scale,
+                guidance_phases=request.guidance_phases,
+                model_switch_phase=request.model_switch_phase,
+                switch_threshold=request.switch_threshold,
+                flow_shift=request.flow_shift,
+                seed=request.seed,
+                fps=WAN22_FPS,
+            )
+            output_num_frames = num_frames
         
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
@@ -2202,7 +2262,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             video_url=full_url,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
-            num_frames=num_frames,
+            num_frames=output_num_frames,
             width=metadata["width"],
             height=metadata["height"],
             seed=metadata["seed"],
