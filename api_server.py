@@ -1602,7 +1602,7 @@ def perform_rife_upsampling(sample: torch.Tensor, temporal_upsampling: str, fps:
     return sample, output_fps
 
 
-def generate_video_svi2pro_internal(
+def generate_video_sliding_window_internal(
     prompt: str,
     image_start: Optional[Image.Image] = None,
     negative_prompt: str = "",
@@ -1624,12 +1624,15 @@ def generate_video_svi2pro_internal(
     temporal_upsampling: str = "rife2",
 ) -> tuple[str, float, dict]:
     """
-    Generate video using WAN 2.2 SVI2Pro with sliding window for long videos.
+    Generate video using sliding window technique for long videos.
     
-    This function supports:
-    - Sliding window generation for videos longer than window_size
-    - RIFE x2/x4 temporal upsampling
-    - Color correction between windows
+    This function implements proper multi-window generation like the GUI:
+    - Generates video in chunks of sliding_window_size frames
+    - Uses overlapped_latents to maintain continuity between windows
+    - Stitches windows together with proper overlap handling
+    - Applies RIFE temporal upsampling at the end
+    
+    Works with both Lightning and SVI2Pro models.
     """
     global model_instance, model_def, current_model_family
     
@@ -1643,158 +1646,204 @@ def generate_video_svi2pro_internal(
     job_id = str(uuid.uuid4())[:8]
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
     
-    print(f"🎬 Generating SVI2Pro video: {prompt[:50]}...")
-    print(f"   Resolution: {width}x{height}, Frames: {num_frames}, Steps: {num_inference_steps}")
+    # Latent stride (Wan2.2 uses 4x temporal compression)
+    latent_size = 4
+    
+    # Calculate number of windows needed
+    # First window generates sliding_window_size frames
+    # Each subsequent window adds (sliding_window_size - overlap) new frames
+    reuse_frames = sliding_window_overlap * latent_size  # Convert latent overlap to frame overlap
+    frames_per_subsequent_window = sliding_window_size - reuse_frames
+    
+    if num_frames <= sliding_window_size:
+        total_windows = 1
+    else:
+        remaining_after_first = num_frames - sliding_window_size
+        additional_windows = (remaining_after_first + frames_per_subsequent_window - 1) // frames_per_subsequent_window
+        total_windows = 1 + additional_windows
+    
+    print(f"🎬 Generating video with SLIDING WINDOW: {prompt[:50]}...")
+    print(f"   Resolution: {width}x{height}, Total Frames: {num_frames}, Steps: {num_inference_steps}")
     print(f"   Duration: {frames_to_duration(num_frames, fps)}s @ {fps}fps")
-    print(f"   Sliding Window: size={sliding_window_size}, overlap={sliding_window_overlap}")
+    print(f"   Sliding Window: size={sliding_window_size}, overlap={sliding_window_overlap} (reuse_frames={reuse_frames})")
+    print(f"   Windows needed: {total_windows}")
     print(f"   Color Correction: {color_correction_strength}, Temporal Upsampling: {temporal_upsampling}")
     if image_start is not None:
         print(f"   Input image: {image_start.size[0]}x{image_start.size[1]}")
     
     start_time = time.time()
     
-    # Set up offload shared state - use detected attention mode
+    # Set up offload shared state
     offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
-    # Note: NAG values are passed directly to generate() which updates shared_state internally
     
     model_instance._interrupt = False
     
-    # Generate proper loras_slists from model's LoRA configuration
-    # Load LoRAs and configure multipliers for SVI2Pro:
-    # - Phase 1: high_noise LoRA (multiplier=1 in phase1, 0 in phase2)
-    # - Phase 2: low_noise LoRA (multiplier=0 in phase1, 1 in phase2)
-    # This also LOADS the LoRAs into the model - critical step!
+    # Load LoRAs
     loras_slists = load_and_configure_loras(
         num_inference_steps=num_inference_steps,
         guidance_phases=guidance_phases,
         model_switch_phase=model_switch_phase,
     )
     
-    # Progress callback
-    def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
-        if step >= 0:
-            steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
-            extra = f" {denoising_extra}" if denoising_extra else ""
-            print(f"   Step {step + 1}/{steps_display}{extra}")
-    
-    # Convert image_start to tensor format - EXACTLY like wgp.py does for GUI
-    # GUI flow (wgp.py lines 5740-5753):
-    #   1. image_start_tensor = convert_image_to_tensor(resized_pil_image)  # (C, H, W)
-    #   2. prefix_video = image_start_tensor.unsqueeze(1)  # (C, 1, H, W)
-    #   3. pre_video_guide = prefix_video
-    #   4. pre_video_frame = convert_tensor_to_image(prefix_video[:, -1])  # PIL
-    #   5. input_video_for_model = pre_video_guide
+    # Convert image_start to tensor
     image_start_tensor = None
     input_video_tensor = None
     pre_video_frame_pil = None
     
     if image_start is not None:
-        # Step 1: Convert PIL to tensor (C, H, W) in range [-1, 1] as float32
         image_start_tensor = convert_pil_image_to_tensor(image_start)
-        # Step 2: Add time dimension for input_video (C, 1, H, W)
         input_video_tensor = image_start_tensor.unsqueeze(1)
-        # Step 3: Ensure tensor is float type (GUI does this check at line 6037-6038)
         if input_video_tensor.dtype == torch.uint8:
             input_video_tensor = input_video_tensor.float().div_(127.5).sub_(1.0)
-        # Step 4: pre_video_frame is PIL image (same as input image for first window)
         pre_video_frame_pil = image_start
-        print(f"   image_start_tensor: {image_start_tensor.shape}, input_video: {input_video_tensor.shape}, dtype: {input_video_tensor.dtype}")
+        print(f"   image_start_tensor: {image_start_tensor.shape}, input_video: {input_video_tensor.shape}")
     
-    # VAE_tile_size = 0 means no tiling (faster, uses more VRAM)
-    vae_tile_size = 0
+    # Initialize cache
+    if hasattr(model_instance, 'model') and model_instance.model is not None:
+        object.__setattr__(model_instance.model, 'cache', None)
+    if hasattr(model_instance, 'model2') and model_instance.model2 is not None:
+        object.__setattr__(model_instance.model2, 'cache', None)
     
-    # Build generation kwargs - match wgp.py wan_model.generate() call (lines 6034-6123)
-    gen_kwargs = {
-        "input_prompt": prompt,
-        "n_prompt": negative_prompt if negative_prompt else None,
-        "image_start": image_start_tensor,  # Tensor (C, H, W) - GUI passes this
-        "image_end": None,
-        "width": width,
-        "height": height,
-        "frame_num": num_frames,
-        "sampling_steps": num_inference_steps,
-        "guide_scale": guidance_scale,
-        "seed": seed,
-        "VAE_tile_size": vae_tile_size,
-        "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
-        "callback": video_progress_callback,
-    }
-    
-    # Add input_video for i2v flow (line 6044 in wgp.py)
-    if input_video_tensor is not None:
-        gen_kwargs["input_video"] = input_video_tensor
-    
-    # SVI2Pro specific params - match GUI generate() call exactly
-    # Lines 6110, 6113-6114 in wgp.py
-    if pre_video_frame_pil is not None:
-        gen_kwargs["pre_video_frame"] = pre_video_frame_pil  # PIL Image
-        gen_kwargs["window_no"] = 1  # First window
-        # prefix_video = input_video_tensor for first window with image (line 5744, 6031, 6114)
-        gen_kwargs["prefix_video"] = input_video_tensor
-        # prefix_frames_count = 1 for first window with single image (line 6030)
-        gen_kwargs["prefix_frames_count"] = 1
-        # input_ref_images = None by default (line 5570, 6040 - only set if user provides refs)
-        print(f"   Set pre_video_frame (PIL), prefix_video, window_no=1, prefix_frames_count=1")
-    
-    # Add flow shift (line 6055)
-    gen_kwargs["shift"] = flow_shift
-    
-    # Add dual-phase guidance parameters (lines 6058-6064)
-    gen_kwargs["guide_phases"] = guidance_phases
-    gen_kwargs["model_switch_phase"] = model_switch_phase
-    gen_kwargs["switch_threshold"] = switch_threshold
-    gen_kwargs["guide2_scale"] = guidance2_scale
-    
-    # Use unipc solver for SVI2Pro (more consistent results than euler)
-    gen_kwargs["sample_solver"] = "unipc"
-    
-    # Additional params from GUI (lines 6091-6098)
-    gen_kwargs["causal_block_size"] = 5
-    gen_kwargs["causal_attention"] = True
-    gen_kwargs["fps"] = fps
-    gen_kwargs["overlap_size"] = sliding_window_overlap  # For latent overlap (line 6097)
-    gen_kwargs["color_correction_strength"] = color_correction_strength  # Line 6098
-    
-    # NAG (Normalized Attention Guidance) parameters - GUI passes these (lines 6109-6111)
-    # NAG_scale=1 means disabled, >1 enables negative prompt enforcement even without CFG
-    gen_kwargs["NAG_scale"] = 1.0  # Disabled by default (same as GUI default)
-    gen_kwargs["NAG_tau"] = 3.5
-    gen_kwargs["NAG_alpha"] = 0.5
-    
-    # Video prompt type for special modes (line 6114) - empty string for standard i2v
-    gen_kwargs["video_prompt_type"] = ""
-    
-    # Window start frame for multi-window generation (line 6127)
-    gen_kwargs["window_start_frame_no"] = 0  # First window starts at 0
-    
-    # Image mode: 0 = video output, 1 = image output (line 6113)
-    gen_kwargs["image_mode"] = 0
-    
-    # CRITICAL: Pass model_type and offloadobj
-    gen_kwargs["model_type"] = current_base_model_type
-    gen_kwargs["offloadobj"] = offloadobj
-    
-    # Provide a no-op set_header_text callback
-    gen_kwargs["set_header_text"] = lambda txt: print(f"   Phase: {txt}")
+    # Variables for window loop
+    all_video_chunks = []
+    overlapped_latents = None
+    prefix_video = input_video_tensor
+    frames_generated = 0
+    window_start_frame = 0
     
     try:
-        # Initialize cache attribute
-        if hasattr(model_instance, 'model') and model_instance.model is not None:
-            object.__setattr__(model_instance.model, 'cache', None)
-            print(f"   Set model.cache = None")
-        if hasattr(model_instance, 'model2') and model_instance.model2 is not None:
-            object.__setattr__(model_instance.model2, 'cache', None)
-            print(f"   Set model2.cache = None")
+        for window_no in range(1, total_windows + 1):
+            print(f"\n   ═══ Window {window_no}/{total_windows} ═══")
+            
+            # Calculate frames for this window
+            if window_no == 1:
+                current_window_frames = min(sliding_window_size, num_frames)
+                prefix_frames_count = 1 if image_start is not None else 0
+            else:
+                remaining_frames = num_frames - frames_generated
+                current_window_frames = min(sliding_window_size, remaining_frames + reuse_frames)
+                prefix_frames_count = reuse_frames
+            
+            # Align to latent size (frames must be 1 + 4*n)
+            current_window_frames = ((current_window_frames - 1) // latent_size) * latent_size + 1
+            
+            print(f"   Generating {current_window_frames} frames (prefix_frames_count={prefix_frames_count})")
+            
+            # Progress callback for this window
+            def make_callback(win_no):
+                def video_progress_callback(step, latents=None, force_update=False, override_num_inference_steps=None, denoising_extra="", **kwargs):
+                    if step >= 0:
+                        steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
+                        extra = f" {denoising_extra}" if denoising_extra else ""
+                        print(f"   Step {step + 1}/{steps_display}{extra}")
+                return video_progress_callback
+            
+            # Build kwargs for this window
+            gen_kwargs = {
+                "input_prompt": prompt,
+                "n_prompt": negative_prompt if negative_prompt else None,
+                "image_start": image_start_tensor if window_no == 1 else None,
+                "image_end": None,
+                "width": width,
+                "height": height,
+                "frame_num": current_window_frames,
+                "sampling_steps": num_inference_steps,
+                "guide_scale": guidance_scale,
+                "seed": seed,
+                "VAE_tile_size": 0,
+                "loras_slists": loras_slists,
+                "callback": make_callback(window_no),
+                "shift": flow_shift,
+                "guide_phases": guidance_phases,
+                "model_switch_phase": model_switch_phase,
+                "switch_threshold": switch_threshold,
+                "guide2_scale": guidance2_scale,
+                "sample_solver": "unipc",
+                "causal_block_size": 5,
+                "causal_attention": True,
+                "fps": fps,
+                "overlap_size": sliding_window_overlap,
+                "color_correction_strength": color_correction_strength,
+                "NAG_scale": 1.0,
+                "NAG_tau": 3.5,
+                "NAG_alpha": 0.5,
+                "video_prompt_type": "",
+                "image_mode": 0,
+                "model_type": current_base_model_type,
+                "offloadobj": offloadobj,
+                "set_header_text": lambda txt: print(f"   Phase: {txt}"),
+                "window_no": window_no,
+                "window_start_frame_no": window_start_frame,
+                "prefix_frames_count": prefix_frames_count,
+            }
+            
+            # Window 1: use input image
+            if window_no == 1:
+                if input_video_tensor is not None:
+                    gen_kwargs["input_video"] = input_video_tensor
+                    gen_kwargs["prefix_video"] = input_video_tensor
+                    gen_kwargs["pre_video_frame"] = pre_video_frame_pil
+            else:
+                # Subsequent windows: use overlapped latents from previous window
+                if overlapped_latents is not None:
+                    gen_kwargs["overlapped_latents"] = overlapped_latents
+                if prefix_video is not None:
+                    gen_kwargs["prefix_video"] = prefix_video
+                    gen_kwargs["input_video"] = prefix_video
+                    # Get last frame of prefix_video as pre_video_frame
+                    from shared.utils.utils import convert_tensor_to_image
+                    if prefix_video.shape[1] > 0:
+                        gen_kwargs["pre_video_frame"] = convert_tensor_to_image(prefix_video[:, -1])
+            
+            # Request latent slice for next window (if not last window)
+            if window_no < total_windows:
+                # Get the last few latent frames for continuity
+                return_latent_slice = slice(-max(1, (reuse_frames) // latent_size), None)
+                gen_kwargs["return_latent_slice"] = return_latent_slice
+            
+            # Generate this window
+            result = model_instance.generate(**gen_kwargs)
+            
+            # Extract video tensor and latent slice
+            if isinstance(result, dict):
+                video_chunk = result.get("x", result)
+                overlapped_latents = result.get("latent_slice", None)
+            else:
+                video_chunk = result
+                overlapped_latents = None
+            
+            # For next window, save the last reuse_frames as prefix_video
+            if window_no < total_windows and video_chunk is not None:
+                # video_chunk is (C, T, H, W)
+                if video_chunk.shape[1] > reuse_frames:
+                    prefix_video = video_chunk[:, -reuse_frames:].clone()
+                    print(f"   Saved prefix_video for next window: {prefix_video.shape}")
+            
+            # Trim overlap from beginning (except for first window)
+            if window_no == 1:
+                trimmed_chunk = video_chunk
+                new_frames = current_window_frames
+            else:
+                # Remove the overlapped frames from the beginning
+                trimmed_chunk = video_chunk[:, reuse_frames:]
+                new_frames = trimmed_chunk.shape[1]
+            
+            all_video_chunks.append(trimmed_chunk)
+            frames_generated += new_frames
+            window_start_frame += new_frames
+            
+            print(f"   Window {window_no} complete: {new_frames} new frames, total: {frames_generated}")
+            
+            # Clear cache between windows
+            gc.collect()
+            torch.cuda.empty_cache()
         
-        result = model_instance.generate(**gen_kwargs)
-        
-        # Extract video tensor
-        if isinstance(result, dict):
-            video_tensor = result.get("x", result)
-        else:
-            video_tensor = result
+        # Concatenate all chunks
+        print(f"\n   Concatenating {len(all_video_chunks)} video chunks...")
+        video_tensor = torch.cat(all_video_chunks, dim=1)
+        print(f"   Final video shape: {video_tensor.shape}")
         
         # Apply RIFE temporal upsampling if requested
         output_fps = fps
@@ -1812,7 +1861,7 @@ def generate_video_svi2pro_internal(
         torch.cuda.empty_cache()
     
     generation_time = time.time() - start_time
-    print(f"✅ SVI2Pro video saved to {output_path} in {generation_time:.1f}s")
+    print(f"✅ Sliding window video saved to {output_path} in {generation_time:.1f}s")
     
     metadata = {
         "num_frames": num_frames,
@@ -1824,6 +1873,10 @@ def generate_video_svi2pro_internal(
     }
     
     return str(output_path), generation_time, metadata
+
+
+# Alias for backward compatibility
+generate_video_svi2pro_internal = generate_video_sliding_window_internal
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
