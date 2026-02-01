@@ -1332,9 +1332,9 @@ def generate_video_internal(
     # Enable tiling only for very large generations to avoid OOM
     # Tiling adds overhead so only use when necessary
     vae_tile_size = 0  # Default: no tiling (faster)
-    if num_frames > 300 or (width >= 1280 and num_frames > 200):
-        vae_tile_size = 256
-        print(f"   Enabling VAE tiling (tile_size=256) for large generation")
+    # if num_frames > 300 or (width >= 1280 and num_frames > 200):
+    #     vae_tile_size = 256
+    #     print(f"   Enabling VAE tiling (tile_size=256) for large generation")
     
     # Build generation kwargs
     gen_kwargs = {
