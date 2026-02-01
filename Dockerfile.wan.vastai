@@ -1,10 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# WAN 2.2 SVI2Pro Enhanced Lightning Video Generation for Vast.ai Serverless
+# WAN 2.2 Enhanced Lightning v2 Video Generation for Vast.ai Serverless
 # 
 # This Dockerfile creates an image optimized for Vast.ai deployment:
 #   - Models downloaded at RUNTIME (smaller image, ~8GB)
 #   - SKIP shared preprocessing models (SAM, DWPose, depth, etc.)
-#   - No LoRAs downloaded
+#   - Only downloads: WAN 2.2 Lightning model + RIFE (flownet.pkl)
 #   - STANDARD Vast.ai PyWorker integration via start_server.sh
 #
 # BUILD PROCESS (run on a GPU machine for SageAttention):
@@ -19,14 +19,14 @@
 #     PYWORKER_REPO: https://github.com/YOUR_USER/YOUR_REPO (containing pyworker/worker.py)
 #     PYWORKER_REF: main (optional, defaults to main)
 #
-# NOTE: First startup will download model weights (~20GB for WAN 2.2 SVI2Pro).
+# NOTE: First startup will download model weights (~15GB for WAN 2.2 Lightning).
 #       Mount a persistent volume to /workspace/ckpts for faster restarts.
 #
 # FEATURES:
-#   - SVI2Pro Lightning settings (8 steps, dual-phase guidance)
+#   - Lightning v2 settings (4 steps, ultra-fast inference)
+#   - Sliding window for long videos (>5 seconds auto-enabled)
 #   - RIFE x2 temporal upsampling for smoother videos
-#   - Color correction strength 1.0 for sliding window continuity
-#   - Supports videos >10 seconds via sliding window method
+#   - No SVI2Pro LoRAs required (simpler deployment)
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -124,12 +124,12 @@ RUN chmod +x /workspace/start_wan_vastai.sh /workspace/start_pyworker.sh /worksp
 # HuggingFace cache location
 ENV HF_HOME=/workspace/.cache/huggingface
 
-# Model configuration (WAN 2.2 SVI2Pro Enhanced Lightning v2)
-ENV WAN2GP_MODEL_TYPE="i2v_2_2_Enhanced_Lightning_v2_svi2pro"
+# Model configuration (WAN 2.2 Enhanced Lightning v2 - NOT SVI2Pro)
+ENV WAN2GP_MODEL_TYPE="i2v_2_2_Enhanced_Lightning_v2"
 ENV WAN2GP_PROFILE="3"
 ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
 
-# Sliding window configuration for long videos
+# Sliding window configuration for long videos (auto-enabled for duration > 5s)
 ENV WAN2GP_SLIDING_WINDOW_SIZE="81"
 ENV WAN2GP_SLIDING_WINDOW_OVERLAP="4"
 ENV WAN2GP_COLOR_CORRECTION_STRENGTH="1"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Vast.ai Serverless Entrypoint for WAN 2.2 SVI2Pro Video Generation
+# Vast.ai Serverless Entrypoint for WAN 2.2 Lightning Video Generation
 #
 # This script follows the STANDARD Vast.ai approach:
 #   1. Sets up the environment
@@ -13,11 +13,11 @@
 #
 # Optional Environment Variables:
 #   PYWORKER_REF: Git ref to checkout (default: main)
-#   WAN2GP_MODEL_TYPE: Model to load (default: i2v_2_2_Enhanced_Lightning_v2_svi2pro)
+#   WAN2GP_MODEL_TYPE: Model to load (default: i2v_2_2_Enhanced_Lightning_v2)
 #   WAN2GP_PROFILE: MMGP profile 1-6 (default: 3)
 #   MODEL_SERVER_PORT: Backend API port (default: 8000)
 #
-# SVI2Pro Settings (configurable via env vars):
+# Sliding Window Settings (configurable via env vars):
 #   WAN2GP_SLIDING_WINDOW_SIZE: Sliding window size (default: 81)
 #   WAN2GP_SLIDING_WINDOW_OVERLAP: Overlap frames (default: 4)
 #   WAN2GP_COLOR_CORRECTION_STRENGTH: Color correction (default: 1)
@@ -50,13 +50,13 @@ export TORCH_ALLOW_TF32_CUDNN=1
 export SDL_AUDIODRIVER=dummy
 export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
 
-# API configuration (default to WAN 2.2 SVI2Pro Enhanced Lightning v2)
-export WAN2GP_MODEL_TYPE=${WAN2GP_MODEL_TYPE:-"i2v_2_2_Enhanced_Lightning_v2_svi2pro"}
+# API configuration (default to WAN 2.2 Enhanced Lightning v2 - NOT SVI2Pro)
+export WAN2GP_MODEL_TYPE=${WAN2GP_MODEL_TYPE:-"i2v_2_2_Enhanced_Lightning_v2"}
 export WAN2GP_PROFILE=${WAN2GP_PROFILE:-"3"}
 export MODEL_SERVER_PORT=${MODEL_SERVER_PORT:-"8000"}
 export WAN2GP_OUTPUT_DIR=${WAN2GP_OUTPUT_DIR:-"/workspace/outputs"}
 
-# SVI2Pro / Sliding Window Settings
+# Sliding Window Settings (auto-enabled for duration > 5s)
 export WAN2GP_SLIDING_WINDOW_SIZE=${WAN2GP_SLIDING_WINDOW_SIZE:-"81"}
 export WAN2GP_SLIDING_WINDOW_OVERLAP=${WAN2GP_SLIDING_WINDOW_OVERLAP:-"4"}
 export WAN2GP_COLOR_CORRECTION_STRENGTH=${WAN2GP_COLOR_CORRECTION_STRENGTH:-"1"}
