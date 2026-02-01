@@ -811,6 +811,90 @@ def decode_base64_image(image_base64: str) -> Image.Image:
     return image.convert("RGB")
 
 
+def resize_image_preserve_aspect(
+    image: Image.Image, 
+    target_width: int, 
+    target_height: int, 
+    block_size: int = 16,
+    fit_mode: str = "cover"
+) -> Image.Image:
+    """
+    Resize image with aspect ratio handling similar to GUI's calculate_dimensions_and_resize_image.
+    
+    Args:
+        image: Input PIL image
+        target_width: Target width
+        target_height: Target height
+        block_size: Alignment block size (default 16 for WAN VAE)
+        fit_mode: "cover" (crop to fill), "contain" (letterbox), or "stretch" (simple resize)
+    
+    Returns:
+        Resized PIL image with dimensions aligned to block_size
+    """
+    img_width, img_height = image.size
+    
+    if fit_mode == "stretch":
+        # Simple resize (may distort)
+        return image.resize((target_width, target_height), Image.LANCZOS)
+    
+    elif fit_mode == "cover":
+        # Scale and crop to fill target (no letterboxing)
+        img_aspect = img_width / img_height
+        target_aspect = target_width / target_height
+        
+        if img_aspect > target_aspect:
+            # Image is wider - fit by height, crop width
+            new_height = target_height
+            new_width = int(target_height * img_aspect)
+        else:
+            # Image is taller - fit by width, crop height
+            new_width = target_width
+            new_height = int(target_width / img_aspect)
+        
+        # Align to block size
+        new_width = (new_width // block_size) * block_size
+        new_height = (new_height // block_size) * block_size
+        
+        # Resize
+        resized = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Center crop to target
+        left = (new_width - target_width) // 2
+        top = (new_height - target_height) // 2
+        cropped = resized.crop((left, top, left + target_width, top + target_height))
+        return cropped
+    
+    elif fit_mode == "contain":
+        # Scale to fit within target, add black letterbox/pillarbox
+        img_aspect = img_width / img_height
+        target_aspect = target_width / target_height
+        
+        if img_aspect > target_aspect:
+            # Image is wider - fit by width
+            new_width = target_width
+            new_height = int(target_width / img_aspect)
+        else:
+            # Image is taller - fit by height
+            new_height = target_height
+            new_width = int(target_height * img_aspect)
+        
+        # Align to block size
+        new_width = (new_width // block_size) * block_size
+        new_height = (new_height // block_size) * block_size
+        
+        resized = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Create black canvas and paste centered
+        canvas = Image.new("RGB", (target_width, target_height), (0, 0, 0))
+        left = (target_width - new_width) // 2
+        top = (target_height - new_height) // 2
+        canvas.paste(resized, (left, top))
+        return canvas
+    
+    else:
+        raise ValueError(f"Unknown fit_mode: {fit_mode}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODEL LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1237,9 +1321,12 @@ def generate_video_internal(
         image_start_tensor = convert_pil_image_to_tensor(image_start)
         # Add time dimension: (C, H, W) -> (C, 1, H, W)
         input_video_tensor = image_start_tensor.unsqueeze(1)
+        # Ensure tensor is float type (GUI does this check at line 6037-6038)
+        if input_video_tensor.dtype == torch.uint8:
+            input_video_tensor = input_video_tensor.float().div_(127.5).sub_(1.0)
         # For SVI2Pro, also keep reference to PIL image
         pre_video_frame_pil = image_start
-        print(f"   Converted to input_video tensor: {input_video_tensor.shape}")
+        print(f"   Converted to input_video tensor: {input_video_tensor.shape}, dtype: {input_video_tensor.dtype}")
     
     # Calculate VAE tile size based on resolution and frame count
     # Enable tiling only for very large generations to avoid OOM
@@ -1302,6 +1389,25 @@ def generate_video_internal(
     # For WAN22 models, use unipc solver for better consistency
     if current_model_family in ["wan22", "wan22_svi2pro"]:
         gen_kwargs["sample_solver"] = "unipc"
+        
+        # Additional WAN22 parameters to match GUI (lines 6091-6127 in wgp.py)
+        gen_kwargs["causal_block_size"] = 5
+        gen_kwargs["causal_attention"] = True
+        
+        # NAG (Normalized Attention Guidance) parameters - GUI passes these (lines 6109-6111)
+        # NAG_scale=1 means disabled, >1 enables negative prompt enforcement even without CFG
+        gen_kwargs["NAG_scale"] = 1.0  # Disabled by default
+        gen_kwargs["NAG_tau"] = 3.5
+        gen_kwargs["NAG_alpha"] = 0.5
+        
+        # Video prompt type for special modes - empty string for standard i2v
+        gen_kwargs["video_prompt_type"] = ""
+        
+        # Window start frame for multi-window generation
+        gen_kwargs["window_start_frame_no"] = 0  # First window starts at 0
+        
+        # Image mode: 0 = video output, 1 = image output
+        gen_kwargs["image_mode"] = 0
     
     # CRITICAL: Pass model_type and offloadobj - required for the model to function
     gen_kwargs["model_type"] = current_base_model_type
@@ -1544,9 +1650,7 @@ def generate_video_svi2pro_internal(
     offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
-    offload.shared_state["_nag_scale"] = 1.0
-    offload.shared_state["_nag_tau"] = 3.5
-    offload.shared_state["_nag_alpha"] = 0.5
+    # Note: NAG values are passed directly to generate() which updates shared_state internally
     
     model_instance._interrupt = False
     
@@ -1580,13 +1684,23 @@ def generate_video_svi2pro_internal(
     pre_video_frame_pil = None
     
     if image_start is not None:
-        # Step 1: Convert PIL to tensor (C, H, W) in range [-1, 1]
+        # Step 1: Convert PIL to tensor (C, H, W) in range [-1, 1] as float32
         image_start_tensor = convert_pil_image_to_tensor(image_start)
         # Step 2: Add time dimension for input_video (C, 1, H, W)
         input_video_tensor = image_start_tensor.unsqueeze(1)
-        # Step 3: pre_video_frame is PIL image (same as input image for first window)
+        # Step 3: Ensure tensor is float type (GUI does this check at line 6037-6038)
+        if input_video_tensor.dtype == torch.uint8:
+            input_video_tensor = input_video_tensor.float().div_(127.5).sub_(1.0)
+        # Step 4: pre_video_frame is PIL image (same as input image for first window)
         pre_video_frame_pil = image_start
-        print(f"   image_start_tensor: {image_start_tensor.shape}, input_video: {input_video_tensor.shape}")
+        print(f"   image_start_tensor: {image_start_tensor.shape}, input_video: {input_video_tensor.shape}, dtype: {input_video_tensor.dtype}")
+    
+    # Calculate VAE_tile_size dynamically based on resolution/frames (like GUI does)
+    # Use tiling for large generations to prevent OOM
+    vae_tile_size = 0  # Default: no tiling (faster)
+    if num_frames > 200 or (width >= 1280 and num_frames > 120):
+        vae_tile_size = 256
+        print(f"   Enabling VAE tiling (tile_size=256) for large generation")
     
     # Build generation kwargs - match wgp.py wan_model.generate() call (lines 6034-6123)
     gen_kwargs = {
@@ -1600,7 +1714,7 @@ def generate_video_svi2pro_internal(
         "sampling_steps": num_inference_steps,
         "guide_scale": guidance_scale,
         "seed": seed,
-        "VAE_tile_size": 0,
+        "VAE_tile_size": vae_tile_size,
         "loras_slists": loras_slists,  # Properly configured LoRA phase multipliers
         "callback": video_progress_callback,
     }
@@ -1639,6 +1753,21 @@ def generate_video_svi2pro_internal(
     gen_kwargs["fps"] = fps
     gen_kwargs["overlap_size"] = sliding_window_overlap  # For latent overlap (line 6097)
     gen_kwargs["color_correction_strength"] = color_correction_strength  # Line 6098
+    
+    # NAG (Normalized Attention Guidance) parameters - GUI passes these (lines 6109-6111)
+    # NAG_scale=1 means disabled, >1 enables negative prompt enforcement even without CFG
+    gen_kwargs["NAG_scale"] = 1.0  # Disabled by default (same as GUI default)
+    gen_kwargs["NAG_tau"] = 3.5
+    gen_kwargs["NAG_alpha"] = 0.5
+    
+    # Video prompt type for special modes (line 6114) - empty string for standard i2v
+    gen_kwargs["video_prompt_type"] = ""
+    
+    # Window start frame for multi-window generation (line 6127)
+    gen_kwargs["window_start_frame_no"] = 0  # First window starts at 0
+    
+    # Image mode: 0 = video output, 1 = image output (line 6113)
+    gen_kwargs["image_mode"] = 0
     
     # CRITICAL: Pass model_type and offloadobj
     gen_kwargs["model_type"] = current_base_model_type
@@ -2011,14 +2140,17 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             height=request.height,
         )
         
-        # Fetch and resize image
+        # Fetch and resize image with aspect ratio preservation
         print(f"📥 Fetching image from: {request.image_url[:80]}...")
         try:
             image_start = await fetch_image_from_url(request.image_url)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
         
-        image_start = image_start.resize((width, height), Image.LANCZOS)
+        # Use smart resize with "cover" mode to preserve aspect ratio (like GUI)
+        original_size = image_start.size
+        image_start = resize_image_preserve_aspect(image_start, width, height, block_size=16, fit_mode="cover")
+        print(f"   Resized image: {original_size} -> {image_start.size} (cover mode)")
         
         num_frames = duration_to_frames_wan22(request.duration)
         actual_duration = frames_to_duration(num_frames, WAN22_FPS)
@@ -2130,14 +2262,18 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
             height=request.height,
         )
         
-        # Fetch and resize image
+        # Fetch and resize image with aspect ratio preservation (like GUI)
         print(f"📥 Fetching image from: {request.image_url[:80]}...")
         try:
             image_start = await fetch_image_from_url(request.image_url)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to fetch image: {str(e)}")
         
-        image_start = image_start.resize((width, height), Image.LANCZOS)
+        # Use smart resize with "cover" mode (scale + crop) to preserve aspect ratio
+        # This matches the GUI's fit_crop behavior and avoids distortion artifacts
+        original_size = image_start.size
+        image_start = resize_image_preserve_aspect(image_start, width, height, block_size=16, fit_mode="cover")
+        print(f"   Resized image: {original_size} -> {image_start.size} (cover mode)")
         
         num_frames = duration_to_frames_wan22(request.duration)
         base_fps = WAN22_FPS
