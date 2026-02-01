@@ -505,6 +505,7 @@ class Wan22ImageToVideoRequest(BaseModel):
     use_sliding_window: Optional[bool] = Field(None, description="Enable sliding window for long videos (auto-enabled if duration > 5s)")
     sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
     sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows")
+    sliding_window_overlap_noise: int = Field(20, ge=0, le=100, description="Noise added to overlapped frames to reduce stitching glitch (20 recommended for Lightning)")
     color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows")
     temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field("rife2", description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)")
     
@@ -558,6 +559,7 @@ class SVI2ProImageToVideoRequest(BaseModel):
     # Sliding window settings
     sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
     sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows (4 for SVI2Pro)")
+    sliding_window_overlap_noise: int = Field(20, ge=0, le=100, description="Noise added to overlapped frames to reduce stitching glitch (20 recommended)")
     color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows (1.0 recommended)")
     
     # Post-processing
@@ -1649,6 +1651,7 @@ def generate_video_sliding_window_internal(
     fps: int = 16,
     sliding_window_size: int = 81,
     sliding_window_overlap: int = 4,
+    sliding_window_overlap_noise: int = 20,
     color_correction_strength: float = 1.0,
     temporal_upsampling: str = "rife2",
 ) -> tuple[str, float, dict]:
@@ -1660,6 +1663,10 @@ def generate_video_sliding_window_internal(
     - Uses overlapped_latents to maintain continuity between windows
     - Stitches windows together with proper overlap handling
     - Applies RIFE temporal upsampling at the end
+    
+    The overlap_noise parameter adds noise to overlapped frames to reduce
+    visible stitching artifacts/glitches at window boundaries. Default 20
+    is recommended for Lightning LoRA models.
     
     Works with both Lightning and SVI2Pro models.
     """
@@ -1696,7 +1703,7 @@ def generate_video_sliding_window_internal(
     print(f"🎬 Generating video with SLIDING WINDOW: {prompt[:50]}...")
     print(f"   Resolution: {width}x{height}, Total Frames: {num_frames}, Steps: {num_inference_steps}")
     print(f"   Duration: {frames_to_duration(num_frames, fps)}s @ {fps}fps")
-    print(f"   Sliding Window: size={sliding_window_size}, overlap={sliding_window_overlap} (reuse_frames={reuse_frames})")
+    print(f"   Sliding Window: size={sliding_window_size}, overlap={sliding_window_overlap}, overlap_noise={sliding_window_overlap_noise} (reuse_frames={reuse_frames})")
     print(f"   Windows needed: {total_windows}")
     print(f"   Color Correction: {color_correction_strength}, Temporal Upsampling: {temporal_upsampling}")
     if image_start is not None:
@@ -1796,6 +1803,7 @@ def generate_video_sliding_window_internal(
                 "causal_attention": True,
                 "fps": fps,
                 "overlap_size": sliding_window_overlap,
+                "overlap_noise": sliding_window_overlap_noise,
                 "color_correction_strength": color_correction_strength,
                 "NAG_scale": 1.0,
                 "NAG_tau": 3.5,
@@ -2255,7 +2263,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
             print(f"   - switch_threshold: {request.switch_threshold}")
             print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
-            print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}")
+            print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}, overlap_noise: {request.sliding_window_overlap_noise}")
             print(f"   - color_correction: {request.color_correction_strength}, temporal_upsampling: {request.temporal_upsampling}")
             
             # Calculate output fps based on temporal upsampling
@@ -2283,6 +2291,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
                 fps=base_fps,
                 sliding_window_size=request.sliding_window_size,
                 sliding_window_overlap=request.sliding_window_overlap,
+                sliding_window_overlap_noise=request.sliding_window_overlap_noise,
                 color_correction_strength=request.color_correction_strength,
                 temporal_upsampling=request.temporal_upsampling or "",
             )
@@ -2363,20 +2372,17 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
 # ENDPOINTS: WAN2.2 SVI2Pro (Image-to-Video with Sliding Window)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/generate/svi2pro/i2v", response_model=GenerationResponse)
-async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request: Request):
+@app.post("/generate/wan22/i2v", response_model=GenerationResponse)
+async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: Request):
     """
-    Generate a long video from an image (WAN 2.2 SVI2Pro Enhanced Lightning v2)
+    Generate video from an image (WAN 2.2)
     
     Features:
     - Sliding window generation for videos longer than 10 seconds
-    - 8-step SVI2Pro Lightning inference
+    - 8-step inference
     - RIFE x2 temporal upsampling for smoother output (doubles fps)
     - Color correction between windows for consistency
     - 16 FPS base output (32 FPS with RIFE x2)
-    
-    This endpoint is optimized for long video generation. For videos under 5 seconds,
-    use the /generate/wan22/i2v endpoint instead for faster generation.
     
     Prompt format for temporal control:
     "(at 0 seconds: description). (at 5 seconds: description)."
@@ -2437,7 +2443,7 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
         print(f"   - guidance_scale: {request.guidance_scale}, guidance2_scale: {request.guidance2_scale}")
         print(f"   - switch_threshold: {request.switch_threshold}")
         print(f"   - flow_shift: {request.flow_shift}, sample_solver: unipc")
-        print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}")
+        print(f"   - sliding_window_size: {request.sliding_window_size}, overlap: {request.sliding_window_overlap}, overlap_noise: {request.sliding_window_overlap_noise}")
         print(f"   - color_correction_strength: {request.color_correction_strength}")
         print(f"   - temporal_upsampling: {request.temporal_upsampling}")
         print(f"   - base_fps: {base_fps}, output_fps: {output_fps}")
@@ -2461,6 +2467,7 @@ async def generate_svi2pro_i2v(request: SVI2ProImageToVideoRequest, http_request
             fps=base_fps,
             sliding_window_size=request.sliding_window_size,
             sliding_window_overlap=request.sliding_window_overlap,
+            sliding_window_overlap_noise=request.sliding_window_overlap_noise,
             color_correction_strength=request.color_correction_strength,
             temporal_upsampling=request.temporal_upsampling or "",
         )
@@ -2740,7 +2747,7 @@ def main():
 ║    POST /generate/image       - Z-Image text-to-image                         ║
 ║    POST /generate/ltx2/i2v    - LTX-2 image-to-video                          ║
 ║    POST /generate/wan22/i2v   - Wan2.2 Lightning v2 image-to-video            ║
-║    POST /generate/svi2pro/i2v - SVI2Pro long video (sliding window, RIFE x2)  ║
+║    POST /generate/wan22/i2v - WAN22 I2V (sliding window, RIFE x2)             ║
 ║    POST /reload               - Switch model type                             ║
 ║    GET  /health               - Health check                                  ║
 ║    GET  /info                 - API information                               ║
