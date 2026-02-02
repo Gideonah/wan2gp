@@ -1,0 +1,181 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIMIZED LTX-2 / Wan2.1 Video Generation for Vast.ai
+# 
+# Multi-stage build to minimize image size:
+#   - Stage 1 (builder): Compile SageAttention with full CUDA toolkit
+#   - Stage 2 (runtime): Slim runtime image with only what's needed
+#
+# ESTIMATED SAVINGS: ~4-6GB compared to devel-based single-stage
+#
+# BUILD (requires GPU or specify architectures):
+#   docker build -f Dockerfile.optimized -t your-registry/ltx2-optimized:latest \
+#       --build-arg CUDA_ARCHITECTURES="8.6;8.9" .
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ STAGE 1: BUILDER - Compile SageAttention                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04 AS builder
+
+ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
+ENV FORCE_CUDA="1"
+ENV MAX_JOBS="4"
+
+# Minimal build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev git cmake ninja-build && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Install latest PyTorch for building SageAttention
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu126
+
+# Clone and build SageAttention as a wheel
+RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git && \
+    cd SageAttention && \
+    # Patch setup.py to use our architectures instead of detecting GPU
+    python3 -c "
+import os
+with open('setup.py', 'r') as f:
+    content = f.read()
+arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST', '8.6')
+arch_set = '{' + ', '.join([f'\"{a}\"' for a in arch_list.split(';')]) + '}'
+old_section = '''compute_capabilities = set()
+device_count = torch.cuda.device_count()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 8:
+        warnings.warn(f\"skipping GPU {i} with compute capability {major}.{minor}\")
+        continue
+    compute_capabilities.add(f\"{major}.{minor}\")'''
+new_section = 'compute_capabilities = ' + arch_set
+content = content.replace(old_section, new_section)
+with open('setup.py', 'w') as f:
+    f.write(content)
+" && \
+    pip install --no-cache-dir setuptools wheel && \
+    python3 setup.py bdist_wheel && \
+    cp dist/*.whl /build/sageattention.whl
+
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ STAGE 2: RUNTIME - Slim production image                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Runtime-only system dependencies (no compilers!)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    ffmpeg curl ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /workspace
+
+# Copy the pre-built SageAttention wheel
+COPY --from=builder /build/sageattention.whl /tmp/
+
+# Install latest PyTorch FIRST (required before SageAttention)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir \
+    torch torchvision torchaudio \
+    --extra-index-url https://download.pytorch.org/whl/cu126
+
+# Install SageAttention from wheel (no compilation needed!)
+RUN pip install --no-cache-dir /tmp/sageattention.whl && \
+    rm /tmp/sageattention.whl
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python Dependencies (stripped down for video generation only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core AI stack
+RUN pip install --no-cache-dir \
+    diffusers==0.34.0 \
+    transformers==4.53.1 \
+    accelerate>=1.1.1 \
+    safetensors \
+    einops \
+    sentencepiece \
+    peft==0.15.0 \
+    mmgp>=3.7.2
+
+# Video processing
+RUN pip install --no-cache-dir \
+    imageio \
+    imageio-ffmpeg \
+    moviepy==1.0.3 \
+    av \
+    ffmpeg-python \
+    decord
+
+# API server
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    httpx \
+    pydantic==2.10.6
+
+# Cloud storage
+RUN pip install --no-cache-dir \
+    google-cloud-storage>=2.14.0 \
+    vastai-sdk
+
+# Utilities
+RUN pip install --no-cache-dir \
+    numpy \
+    tqdm \
+    loguru \
+    omegaconf \
+    hydra-core \
+    easydict \
+    ftfy \
+    nvidia-ml-py
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application Code
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Copy only what's needed (exclude docs, tests, etc.)
+COPY api_server.py /workspace/
+COPY wgp.py /workspace/
+COPY models/ /workspace/models/
+COPY shared/ /workspace/shared/
+COPY profiles/ /workspace/profiles/
+COPY defaults/ /workspace/defaults/
+COPY start_vastai.sh entrypoint_api.sh /workspace/
+
+# Create directories
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp && \
+    chmod +x /workspace/*.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENV HF_HOME=/workspace/.cache/huggingface
+ENV WAN2GP_MODEL_TYPE="ltx2_19B"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+ENV MODEL_SERVER_PORT="8000"
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:80/health || exit 1
+
+CMD ["/workspace/start_vastai.sh"]
