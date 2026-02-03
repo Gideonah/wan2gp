@@ -4,11 +4,19 @@ from pathlib import Path
 from typing import Optional
 
 import av
-import cv2
 import numpy as np
 import torch
 import os
 from av import AudioFrame
+
+# Lazy import cv2 only when needed (not required for remux_with_audio)
+cv2 = None
+def _get_cv2():
+    global cv2
+    if cv2 is None:
+        import cv2 as _cv2
+        cv2 = _cv2
+    return cv2
 
 
 @dataclass
@@ -56,6 +64,7 @@ class ImageInfo:
 
 def read_frames(video_path: Path, list_of_fps: list[float], start_sec: float, end_sec: float,
                 need_all_frames: bool) -> tuple[list[np.ndarray], list[np.ndarray], Fraction]:
+    cv2 = _get_cv2()
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open {video_path}")

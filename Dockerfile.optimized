@@ -44,14 +44,16 @@ RUN pip install --no-cache-dir \
     peft==0.15.0 \
     mmgp>=3.7.2
 
-# Video processing
+# Video & audio processing
 RUN pip install --no-cache-dir \
     imageio \
     imageio-ffmpeg \
     moviepy==1.0.3 \
     av \
     ffmpeg-python \
-    decord
+    decord \
+    scipy \
+    soundfile
 
 # API server
 RUN pip install --no-cache-dir \
@@ -86,6 +88,7 @@ COPY api_server.py /workspace/
 COPY wgp.py /workspace/
 COPY models/ /workspace/models/
 COPY shared/ /workspace/shared/
+COPY postprocessing/ /workspace/postprocessing/
 COPY profiles/ /workspace/profiles/
 COPY defaults/ /workspace/defaults/
 COPY start_vastai.sh entrypoint_api.sh /workspace/
