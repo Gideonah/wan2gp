@@ -1,0 +1,98 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# WAN 2.2 Enhanced Lightning v2 - OPTIMIZED for Vast.ai Pre-cached Base
+# 
+# Uses vastai/pytorch base image which is pre-cached on Vast instances.
+# This means the ~7.9GB base layer is already on disk - only custom layers pull.
+#
+# BUILD:
+#   docker build -f Dockerfile.wan.vastai.optimized -t your-registry/wan22-vast:latest .
+#
+# EXPECTED IMPROVEMENTS:
+#   - Base image: already cached on Vast (0 bytes to pull)
+#   - PyTorch: already in base image (saves ~2-3GB pull)
+#   - Only requirements + app code need to be pulled (~1-2GB)
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Vast.ai pre-cached PyTorch image with CUDA 13.0.2
+FROM vastai/pytorch:cuda-13.0.2-auto
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Runtime-only system dependencies (base already has most things)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    ffmpeg curl ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /workspace
+
+# Upgrade pip (base image may have older pip)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python Dependencies
+# NOTE: Skip torch/torchvision/torchaudio - already in base image!
+# ─────────────────────────────────────────────────────────────────────────────
+
+COPY requirements.txt /workspace/
+
+# Install requirements (PyTorch already present from base)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# API server extras
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    httpx \
+    google-cloud-storage
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application Code
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Copy only what's needed
+COPY api_server.py /workspace/
+COPY wgp.py /workspace/
+COPY models/ /workspace/models/
+COPY shared/ /workspace/shared/
+COPY profiles/ /workspace/profiles/
+COPY defaults/ /workspace/defaults/
+COPY postprocessing/ /workspace/postprocessing/
+COPY start_wan_vastai.sh entrypoint_api.sh /workspace/
+
+# Create directories
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp && \
+    chmod +x /workspace/*.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# Model configuration (WAN 2.2 Enhanced Lightning v2)
+ENV WAN2GP_MODEL_TYPE="i2v_2_2_Enhanced_Lightning_v2"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+
+# Sliding window for long videos
+ENV WAN2GP_SLIDING_WINDOW_SIZE="81"
+ENV WAN2GP_SLIDING_WINDOW_OVERLAP="4"
+ENV WAN2GP_COLOR_CORRECTION_STRENGTH="1"
+ENV WAN2GP_TEMPORAL_UPSAMPLING="rife2"
+
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+ENV MODEL_SERVER_PORT="8000"
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
+
+EXPOSE 80
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["/workspace/start_wan_vastai.sh"]

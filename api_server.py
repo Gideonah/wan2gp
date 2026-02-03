@@ -20,17 +20,6 @@ Environment Variables:
 
 import os
 import sys
-
-# WORKAROUND: Block SageAttention imports that may have incompatible CUDA kernels
-# for newer GPUs (Blackwell/RTX 50 series). Force fallback to SDPA.
-class _FakeModule:
-    def __getattr__(self, name):
-        raise ImportError("Blocked to prevent CUDA kernel incompatibility")
-sys.modules['sageattention'] = _FakeModule()
-sys.modules['spas_sage_attn'] = _FakeModule()
-sys.modules['sageattn'] = _FakeModule()
-sys.modules['sageattn3'] = _FakeModule()
-
 import time
 import uuid
 import gc
@@ -1288,7 +1277,7 @@ def generate_video_internal(
     
     # Handle seed
     if seed < 0:
-        seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
+        seed = int(torch.randint(0, 2**32 - 1, (1,), device='cpu').item())
     
     job_id = str(uuid.uuid4())[:8]
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
@@ -1688,7 +1677,7 @@ def generate_video_sliding_window_internal(
     
     # Handle seed
     if seed < 0:
-        seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
+        seed = int(torch.randint(0, 2**32 - 1, (1,), device='cpu').item())
     
     job_id = str(uuid.uuid4())[:8]
     output_path = OUTPUT_DIR / f"{job_id}.mp4"
