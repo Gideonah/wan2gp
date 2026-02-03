@@ -20,6 +20,17 @@ Environment Variables:
 
 import os
 import sys
+
+# WORKAROUND: Block SageAttention imports that may have incompatible CUDA kernels
+# for newer GPUs (Blackwell/RTX 50 series). Force fallback to SDPA.
+class _FakeModule:
+    def __getattr__(self, name):
+        raise ImportError("Blocked to prevent CUDA kernel incompatibility")
+sys.modules['sageattention'] = _FakeModule()
+sys.modules['spas_sage_attn'] = _FakeModule()
+sys.modules['sageattn'] = _FakeModule()
+sys.modules['sageattn3'] = _FakeModule()
+
 import time
 import uuid
 import gc
