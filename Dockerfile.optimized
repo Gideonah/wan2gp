@@ -41,25 +41,7 @@ RUN pip install --no-cache-dir \
 RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git && \
     cd SageAttention && \
     # Patch setup.py to use our architectures instead of detecting GPU
-    python3 -c "
-import os
-with open('setup.py', 'r') as f:
-    content = f.read()
-arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST', '8.6')
-arch_set = '{' + ', '.join([f'\"{a}\"' for a in arch_list.split(';')]) + '}'
-old_section = '''compute_capabilities = set()
-device_count = torch.cuda.device_count()
-for i in range(device_count):
-    major, minor = torch.cuda.get_device_capability(i)
-    if major < 8:
-        warnings.warn(f\"skipping GPU {i} with compute capability {major}.{minor}\")
-        continue
-    compute_capabilities.add(f\"{major}.{minor}\")'''
-new_section = 'compute_capabilities = ' + arch_set
-content = content.replace(old_section, new_section)
-with open('setup.py', 'w') as f:
-    f.write(content)
-" && \
+    python3 -c "import os; content = open('setup.py').read(); arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST', '8.6'); arch_set = '{' + ', '.join(['\"' + a + '\"' for a in arch_list.split(';')]) + '}'; old_section = '''compute_capabilities = set()\ndevice_count = torch.cuda.device_count()\nfor i in range(device_count):\n    major, minor = torch.cuda.get_device_capability(i)\n    if major < 8:\n        warnings.warn(f\"skipping GPU {i} with compute capability {major}.{minor}\")\n        continue\n    compute_capabilities.add(f\"{major}.{minor}\")'''; content = content.replace(old_section, 'compute_capabilities = ' + arch_set); open('setup.py', 'w').write(content)" && \
     pip install --no-cache-dir setuptools wheel && \
     python3 setup.py bdist_wheel && \
     cp dist/*.whl /build/sageattention.whl
