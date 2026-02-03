@@ -3,7 +3,6 @@ import tempfile, os
 import ffmpeg
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-import cv2
 import tempfile
 import imageio
 import binascii
