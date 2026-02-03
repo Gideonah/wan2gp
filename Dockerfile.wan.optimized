@@ -30,61 +30,18 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     --extra-index-url https://download.pytorch.org/whl/cu126
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Python Dependencies (stripped down for Wan2.2 video generation)
+# Python Dependencies - use requirements.txt for full compatibility
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Core AI stack
-RUN pip install --no-cache-dir \
-    diffusers==0.34.0 \
-    transformers==4.53.1 \
-    accelerate>=1.1.1 \
-    safetensors \
-    einops \
-    sentencepiece \
-    peft==0.15.0 \
-    mmgp>=3.7.2 \
-    open_clip_torch>=2.29.0
+COPY requirements.txt /workspace/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Video & audio processing (Wan2.2 needs more than LTX)
-RUN pip install --no-cache-dir \
-    imageio \
-    imageio-ffmpeg \
-    moviepy==1.0.3 \
-    av \
-    ffmpeg-python \
-    decord \
-    opencv-python-headless>=4.12.0.88 \
-    scipy \
-    soundfile
-
-# RIFE temporal upsampling support
-RUN pip install --no-cache-dir \
-    torchdiffeq>=0.2.5
-
-# API server
+# API server extras (not in requirements.txt)
 RUN pip install --no-cache-dir \
     fastapi \
     uvicorn \
     python-multipart \
-    httpx \
-    pydantic==2.10.6
-
-# Cloud storage
-RUN pip install --no-cache-dir \
-    google-cloud-storage>=2.14.0 \
-    vastai-sdk
-
-# Utilities
-RUN pip install --no-cache-dir \
-    numpy \
-    tqdm \
-    loguru \
-    omegaconf \
-    hydra-core \
-    easydict \
-    ftfy \
-    nvidia-ml-py \
-    gguf==0.17.1
+    httpx
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Application Code
