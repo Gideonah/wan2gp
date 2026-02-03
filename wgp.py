@@ -26,16 +26,8 @@ except ImportError:
     pass
 from pathlib import Path
 from datetime import datetime
+import gradio as gr
 import random
-
-# Lazy gradio import - only load when UI is actually used
-gr = None
-def _get_gradio():
-    global gr
-    if gr is None:
-        import gradio as _gr
-        gr = _gr
-    return gr
 import json
 import numpy as np
 import importlib
@@ -55,15 +47,7 @@ from shared.utils.process_locks import acquire_GPU_ressources, release_GPU_resso
 from shared.loras_migration import migrate_loras_layout
 from huggingface_hub import hf_hub_download, snapshot_download
 from shared.utils import files_locator as fl 
-
-# Lazy audio gallery import (requires gradio)
-AudioGallery = None
-def _get_audio_gallery():
-    global AudioGallery
-    if AudioGallery is None:
-        from shared.gradio.audio_gallery import AudioGallery as _AG
-        AudioGallery = _AG
-    return AudioGallery  
+from shared.gradio.audio_gallery import AudioGallery  
 import torch
 import gc
 import traceback
