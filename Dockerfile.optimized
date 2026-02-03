@@ -53,7 +53,8 @@ RUN pip install --no-cache-dir \
     ffmpeg-python \
     decord \
     scipy \
-    soundfile
+    soundfile \
+    opencv-python-headless
 
 # API server
 RUN pip install --no-cache-dir \
