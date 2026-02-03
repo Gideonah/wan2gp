@@ -1,73 +1,13 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIMIZED WAN 2.2 Enhanced Lightning v2 for Vast.ai Serverless
 # 
-# Multi-stage build to minimize image size:
-#   - Stage 1 (builder): Compile SageAttention with full CUDA toolkit
-#   - Stage 2 (runtime): Slim runtime image with only what's needed
+# Single-stage runtime image (SageAttention skipped for now)
 #
-# ESTIMATED SAVINGS: ~4-6GB compared to devel-based single-stage
-#
-# BUILD (requires GPU or specify architectures):
-#   docker build -f Dockerfile.wan.optimized -t your-registry/wan22-optimized:latest \
-#       --build-arg CUDA_ARCHITECTURES="8.6;8.9" .
+# BUILD:
+#   docker build -f Dockerfile.wan.optimized -t your-registry/wan22-optimized:latest .
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ STAGE 1: BUILDER - Compile SageAttention                                   │
-# └─────────────────────────────────────────────────────────────────────────────┘
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04 AS builder
-
-ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
-ENV FORCE_CUDA="1"
-ENV MAX_JOBS="4"
-
-# Minimal build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev git cmake ninja-build && \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-# Install latest PyTorch for building SageAttention
-RUN pip install --no-cache-dir \
-    torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu126
-
-# Clone and build SageAttention as a wheel
-RUN git clone --depth 1 https://github.com/thu-ml/SageAttention.git && \
-    cd SageAttention && \
-    # Patch setup.py to use our architectures instead of detecting GPU
-    python3 -c "
-import os
-with open('setup.py', 'r') as f:
-    content = f.read()
-arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST', '8.6')
-arch_set = '{' + ', '.join([f'\"{a}\"' for a in arch_list.split(';')]) + '}'
-old_section = '''compute_capabilities = set()
-device_count = torch.cuda.device_count()
-for i in range(device_count):
-    major, minor = torch.cuda.get_device_capability(i)
-    if major < 8:
-        warnings.warn(f\"skipping GPU {i} with compute capability {major}.{minor}\")
-        continue
-    compute_capabilities.add(f\"{major}.{minor}\")'''
-new_section = 'compute_capabilities = ' + arch_set
-content = content.replace(old_section, new_section)
-with open('setup.py', 'w') as f:
-    f.write(content)
-" && \
-    pip install --no-cache-dir setuptools wheel && \
-    python3 setup.py bdist_wheel && \
-    cp dist/*.whl /build/sageattention.whl
-
-
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ STAGE 2: RUNTIME - Slim production image                                   │
-# └─────────────────────────────────────────────────────────────────────────────┘
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -83,18 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# Copy the pre-built SageAttention wheel
-COPY --from=builder /build/sageattention.whl /tmp/
-
-# Install latest PyTorch FIRST (required before SageAttention)
+# Install latest PyTorch
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir \
     torch torchvision torchaudio \
     --extra-index-url https://download.pytorch.org/whl/cu126
-
-# Install SageAttention from wheel (no compilation needed!)
-RUN pip install --no-cache-dir /tmp/sageattention.whl && \
-    rm /tmp/sageattention.whl
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Python Dependencies (stripped down for Wan2.2 video generation)
