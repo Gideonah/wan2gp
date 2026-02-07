@@ -50,7 +50,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel
 
 # Install PyTorch with CUDA support FIRST (required for packages with CUDA extensions)
-RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
+RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
 
 # Install requirements (insightface needs PyTorch/CUDA already installed)
 RUN pip install -r requirements.txt
