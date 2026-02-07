@@ -873,7 +873,7 @@ class MLPProj(torch.nn.Module):
         if hasattr(self, 'emb_pos'):
             bs, n, d = image_embeds.shape
             image_embeds = image_embeds.view(-1, 2 * n, d)
-            image_embeds = image_embeds + self.emb_pos
+            image_embeds = image_embeds.to(self.emb_pos.dtype) + self.emb_pos
         clip_extra_context_tokens = self.proj(image_embeds)
         return clip_extra_context_tokens
 
@@ -916,6 +916,8 @@ class WanModel(ModelMixin, ConfigMixin):
                     if k.endswith(endfix):
                         v = v.to(dtype)
                         break
+            if k.startswith("patch_embedding_pose."):
+                k = k.replace("patch_embedding_pose.", "pose_patch_embedding.", 1)
             if not k.startswith("vae."):
                 new_sd[k] = v
         return new_sd

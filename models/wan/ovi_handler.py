@@ -25,10 +25,10 @@ class family_handler:
         return {}
 
     @staticmethod
-    def register_lora_cli_args(parser):
+    def register_lora_cli_args(parser, lora_root):
         from .wan_handler import family_handler as wan_family_handler
 
-        return wan_family_handler.register_lora_cli_args(parser)
+        return wan_family_handler.register_lora_cli_args(parser, lora_root)
 
     @staticmethod
     def query_model_def(base_model_type: str, model_def: Dict[str, Any]):
@@ -73,19 +73,20 @@ class family_handler:
         download_def = family_handler.query_model_files(computeList, "ti2v_2_2", model_def)
         if not isinstance(download_def, list):
             download_def = [download_def]
+        bigvgan_v2_files = ["config.json", "bigvgan_generator.pt"]
         download_def  += [{
             "repoId" : "DeepBeepMeep/Wan2.1", 
-            "sourceFolderList" :  ["mmaudio", ],
-            "fileList" : [ [ "v1-16.pth", "best_netG.pt"]]   
+            "sourceFolderList" :  ["mmaudio",  "bigvgan_v2_44khz_128band_512x"],
+            "fileList" : [ [ "v1-16.pth", "best_netG.pt"], bigvgan_v2_files]   
         }]
 
         return download_def
 
     @staticmethod
-    def get_lora_dir(base_model_type, args):
+    def get_lora_dir(base_model_type, args, lora_root):
         from .wan_handler import family_handler as wan_family_handler
 
-        return wan_family_handler.get_lora_dir(base_model_type, args)
+        return wan_family_handler.get_lora_dir(base_model_type, args, lora_root)
 
     @staticmethod
     def load_model(
@@ -101,6 +102,7 @@ class family_handler:
         save_quantized=False,
         submodel_no_list=None,
         text_encoder_filename=None,
+        **kwargs        
     ):
         from .ovi_fusion_engine import OviFusionEngine 
 

@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 import torch
 
 from ..ltx_core.components.diffusion_steps import EulerDiffusionStep
-from ..ltx_core.components.guiders import CFGGuider
+from ..ltx_core.components.guiders import CFGGuider, CFGStarRescalingGuider, LtxAPGGuider
 from ..ltx_core.components.noisers import GaussianNoiser
 from ..ltx_core.components.protocols import DiffusionStepProtocol
 from ..ltx_core.components.schedulers import LTX2Scheduler
@@ -32,6 +32,7 @@ from .utils.helpers import (
 from .utils.media_io import encode_video
 from .utils.types import PipelineComponents
 from shared.utils.loras_mutipliers import update_loras_slists
+from shared.utils.self_refiner import create_self_refiner_handler, normalize_self_refiner_plan
 from shared.utils.text_encoder_cache import TextEncoderCache
 
 device = get_device()
@@ -81,6 +82,13 @@ class TI2VidOneStagePipeline:
         num_inference_steps: int,
         cfg_guidance_scale: float,
         images: list[tuple[str, int, float]],
+        cfg_star_switch: int = 0,
+        apg_switch: int = 0,
+        slg_switch: int = 0,
+        slg_layers: list[int] | None = None,
+        slg_start: float = 0.0,
+        slg_end: float = 1.0,
+        alt_guidance_scale: float = 1.0,
         enhance_prompt: bool = False,
         audio_conditionings: list | None = None,
         callback: Callable[..., None] | None = None,
@@ -89,6 +97,11 @@ class TI2VidOneStagePipeline:
         text_connectors: dict | None = None,
         masking_source: dict | None = None,
         masking_strength: float | None = None,
+        self_refiner_setting: int = 0,
+        self_refiner_plan: str = "",
+        self_refiner_f_uncertainty: float = 0.1,
+        self_refiner_certain_percentage: float = 0.999,
+        self_refiner_max_plans: int = 1,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=False)
 
@@ -96,7 +109,31 @@ class TI2VidOneStagePipeline:
         mask_generator = torch.Generator(device=self.device).manual_seed(int(seed) + 1)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
-        cfg_guider = CFGGuider(cfg_guidance_scale)
+        self_refiner_handler = None
+        self_refiner_handler_audio = None
+        if self_refiner_setting and self_refiner_setting > 0:
+            plans, _ = normalize_self_refiner_plan(self_refiner_plan or "", max_plans=self_refiner_max_plans)
+            plan_stage1 = plans[0] if plans else []
+            self_refiner_handler = create_self_refiner_handler(
+                plan_stage1,
+                self_refiner_f_uncertainty,
+                self_refiner_setting,
+                self_refiner_certain_percentage,
+                channel_dim=-1,
+            )
+            self_refiner_handler_audio = create_self_refiner_handler(
+                plan_stage1,
+                self_refiner_f_uncertainty,
+                self_refiner_setting,
+                self_refiner_certain_percentage,
+                channel_dim=-1,
+            )
+        if apg_switch:
+            cfg_guider = LtxAPGGuider(cfg_guidance_scale)
+        elif cfg_star_switch:
+            cfg_guider = CFGStarRescalingGuider(cfg_guidance_scale)
+        else:
+            cfg_guider = CFGGuider(cfg_guidance_scale)
         dtype = torch.bfloat16
 
         text_encoder = self.model_ledger.text_encoder()
@@ -165,12 +202,21 @@ class TI2VidOneStagePipeline:
                     a_context_p,
                     a_context_n,
                     transformer=transformer,  # noqa: F821
+                    alt_guidance_scale=alt_guidance_scale,
+                    slg_switch=slg_switch,
+                    slg_layers=slg_layers,
+                    slg_start=slg_start,
+                    slg_end=slg_end,
                 ),
                 mask_context=mask_context,
                 interrupt_check=interrupt_check,
                 callback=callback,
                 preview_tools=preview_tools,
                 pass_no=1,
+                transformer=transformer,
+                self_refiner_handler=self_refiner_handler,
+                self_refiner_handler_audio=self_refiner_handler_audio,
+                self_refiner_generator=generator,
             )
 
         stage_1_output_shape = VideoPixelShape(batch=1, frames=num_frames, width=width, height=height, fps=frame_rate)

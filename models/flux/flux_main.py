@@ -147,7 +147,11 @@ class model_factory:
         if self.name == 'flux-dev-uso':
             siglip_path =  fl.locate_folder("siglip-so400m-patch14-384")
             siglip_processor = SiglipImageProcessor.from_pretrained(siglip_path)
-            siglip_model = SiglipVisionModel.from_pretrained(siglip_path)
+            siglip_model = offload.fast_load_transformers_model(
+                fl.locate_file(os.path.join("siglip-so400m-patch14-384", "model.safetensors")),
+                modelClass=SiglipVisionModel,
+                defaultConfigPath=fl.locate_file(os.path.join("siglip-so400m-patch14-384", "vision_config.json")),
+            )
             siglip_model.eval().to("cpu")
             if len(model_filename) > 1:
                 from .modules.layers import SigLIPMultiFeatProjModel                
@@ -270,10 +274,37 @@ class model_factory:
                 return None
             device="cuda"
             flux2 = self.is_flux2
-            if flux2:
-                guide_scale = 1.0
+            model_mode = bbargs.get("model_mode", None)
+            model_mode_int = None
+            if model_mode is not None:
+                try:
+                    model_mode_int = int(model_mode)
+                except (TypeError, ValueError):
+                    model_mode_int = None
+            lanpaint_enabled = model_mode_int in (2, 3, 4, 5)
             if self.guidance_max_phases < 1: guide_scale = 1
             if n_prompt is None or len(n_prompt) == 0: n_prompt = "low quality, ugly, unfinished, out of focus, deformed, disfigure, blurry, smudged, restricted palette, flat colors"
+            nag_scale = bbargs.get("NAG_scale", 1.0)
+            nag_tau = bbargs.get("NAG_tau", 3.5)
+            nag_alpha = bbargs.get("NAG_alpha", 0.5)
+            NAG = None
+            if nag_scale > 1 and guide_scale <= 1:
+                NAG = {"scale": nag_scale, "tau": nag_tau, "alpha": nag_alpha, "prefix_len": 0}
+            def _align_seq_len(tensor, target_len):
+                if tensor is None:
+                    return tensor
+                seq_dim = 0 if tensor.dim() == 2 else 1
+                cur_len = tensor.shape[seq_dim]
+                if cur_len == target_len:
+                    return tensor
+                if cur_len < target_len:
+                    pad_len = target_len - cur_len
+                    if seq_dim == 0:
+                        pad = tensor[-1:].repeat(pad_len, 1)
+                        return torch.cat([tensor, pad], dim=0)
+                    pad = tensor[:, -1:, :].repeat(1, pad_len, 1)
+                    return torch.cat([tensor, pad], dim=1)
+                return tensor.narrow(seq_dim, 0, target_len)
             flux_dev_uso = self.name in ['flux-dev-uso']
             flux_dev_umo = self.name in ['flux-dev-umo']
             radiance = self.name in ['flux-chroma-radiance']
@@ -289,6 +320,23 @@ class model_factory:
                 img, img_ids = batched_prc_img(randn)                
                 encode_fn = lambda prompts: list(zip(*batched_prc_txt(self.mistral(prompts).to(torch.bfloat16))))
                 txt_embeds, txt_ids = self.text_encoder_cache.encode(encode_fn, [input_prompt], device=self.device)[0]
+                if NAG is not None:
+                    neg_embeds, neg_ids = self.text_encoder_cache.encode(encode_fn, [n_prompt], device=self.device)[0]
+                    if txt_embeds.dim() == 2:
+                        txt_embeds = txt_embeds.unsqueeze(0)
+                        txt_ids = txt_ids.unsqueeze(0)
+                    if neg_embeds.dim() == 2:
+                        neg_embeds = neg_embeds.unsqueeze(0)
+                        neg_ids = neg_ids.unsqueeze(0)
+                    pos_len = txt_embeds.shape[1]
+                    neg_embeds = _align_seq_len(neg_embeds, pos_len)
+                    neg_ids = _align_seq_len(neg_ids, pos_len)
+                    txt_embeds = torch.cat([txt_embeds, neg_embeds], dim=1)
+                    txt_ids = torch.cat([txt_ids, neg_ids], dim=1)
+                    NAG["cap_embed_len"] = pos_len
+                if txt_embeds.dim() == 2:
+                    txt_embeds = txt_embeds.unsqueeze(0)
+                    txt_ids = txt_ids.unsqueeze(0)
                 txt_embeds, txt_ids = txt_embeds.expand(batch_size, -1, -1), txt_ids.expand(batch_size, -1, -1)
                 vec = torch.zeros(batch_size, 1, device=device, dtype=self.dtype)
                 inp = { "img": img, "img_ids": img_ids, "txt": txt_embeds.to(device), "txt_ids": txt_ids.to(device), "vec": vec }
@@ -401,7 +449,20 @@ class model_factory:
                 if txt.shape[0] == 1 and prompt_bs > 1:
                     txt = txt.repeat(prompt_bs, 1, 1)
                     vec = vec.repeat(prompt_bs, 1)
-                txt_ids = torch.zeros(prompt_bs, txt.shape[1], 3, device=device)
+                if NAG is not None:
+                    pos_len = txt.shape[1]
+                    neg_list = [n_prompt] if isinstance(n_prompt, str) else n_prompt
+                    neg_bs = len(neg_list) if batch_size == 1 and not isinstance(n_prompt, str) else batch_size
+                    neg_contexts = self.text_encoder_cache.encode(encode_fn, neg_list, device=device)
+                    neg_txt = torch.cat([ctx["txt"] for ctx in neg_contexts], dim=0)
+                    if neg_txt.shape[0] == 1 and neg_bs > 1:
+                        neg_txt = neg_txt.repeat(neg_bs, 1, 1)
+                    neg_txt = _align_seq_len(neg_txt, pos_len)
+                    if neg_txt.shape[0] == 1 and txt.shape[0] > 1:
+                        neg_txt = neg_txt.repeat(txt.shape[0], 1, 1)
+                    txt = torch.cat([txt, neg_txt], dim=1)
+                    NAG["cap_embed_len"] = pos_len
+                txt_ids = torch.zeros(txt.shape[0], txt.shape[1], 3, device=device)
                 inp.update({"txt": txt.to(device), "txt_ids": txt_ids.to(device), "vec": vec.to(device)})
                 if guide_scale != 1:
                     neg_list = [n_prompt] if isinstance(n_prompt, str) else n_prompt
@@ -425,6 +486,8 @@ class model_factory:
                     siglip_embedding_ids = torch.zeros( siglip_embedding.shape[0], siglip_embedding.shape[1], 3 ).to(device)
                     inp["siglip_embedding"] = siglip_embedding
                     inp["siglip_embedding_ids"] = siglip_embedding_ids
+                    if NAG is not None:
+                        NAG["prefix_len"] = siglip_embedding.shape[1]
 
                 if radiance:
                     def unpack_latent(x):
@@ -448,6 +511,11 @@ class model_factory:
                 joint_pass=joint_pass,
                 denoising_strength=denoising_strength,
                 masking_strength=masking_strength,
+                model_mode=model_mode,
+                height=height,
+                width=width,
+                vae_scale_factor=8,
+                NAG=NAG,
             )
             if x==None: return None
             # decode latents to pixel space
@@ -456,10 +524,17 @@ class model_factory:
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     x = self.vae.decode(x)
 
-            if image_mask is not None and masking_strength == 1 and not flux2:
-                img_msk_rebuilt = inp["img_msk_rebuilt"]
-                img= input_frames.squeeze(1).unsqueeze(0) # convert_image_to_tensor(image_guide) 
-                x = img * (1 - img_msk_rebuilt) + x.to(img) * img_msk_rebuilt 
+            img_msk_rebuilt = inp.get("img_msk_rebuilt") if isinstance(inp, dict) else None
+            if img_msk_rebuilt is not None and (lanpaint_enabled or (masking_strength == 1 and not flux2)):
+                img = None
+                if input_frames is not None:
+                    img = input_frames.squeeze(1).unsqueeze(0)
+                elif input_ref_images is not None and len(input_ref_images) > 0:
+                    img = convert_image_to_tensor(
+                        input_ref_images[0].resize((width, height), resample=Image.Resampling.LANCZOS)
+                    ).unsqueeze(0)
+                if img is not None:
+                    x = img * (1 - img_msk_rebuilt) + x.to(img) * img_msk_rebuilt
 
             x = x.clamp(-1, 1)
             x = x.transpose(0, 1)

@@ -8,6 +8,7 @@ from torch.utils import _pytree as pytree
 from optimum.quanto import QModuleMixin
 from optimum.quanto.tensor.qtensor import QTensor
 from optimum.quanto.tensor.qtype import qtype as _quanto_qtype, qtypes as _quanto_qtypes
+from collections import OrderedDict
 
 
 HANDLER_NAME = "gguf"
@@ -58,7 +59,8 @@ def _resolve_default_dtype(dtype, fallback=None):
     if _GGUF_DEFAULT_DTYPE is not None and fallback is not None and dtype == fallback:
         return _GGUF_DEFAULT_DTYPE
     return dtype
-def read_gguf_metadata(file_path):
+
+def get_file_metadata(file_path):
     if gguf is None:
         raise RuntimeError("GGUF support requires the 'gguf' package.")
     reader = gguf.GGUFReader(file_path)
@@ -69,7 +71,7 @@ def read_gguf_metadata(file_path):
             metadata["config"] = field.contents() if callable(getattr(field, "contents", None)) else field.contents
         except Exception:
             pass
-    return metadata
+    return OrderedDict(), metadata
 
 
 def _filter_state_dict_basic(state_dict, base_model_prefix, keep_prefix=False):
@@ -214,7 +216,7 @@ def load_gguf_state_dict(
         for name, bias in list(state_dict.items()):
             if not name.endswith(".bias") or not torch.is_tensor(bias):
                 continue
-            weight_name = name[:-5] + "weight"
+            weight_name = name[:-5] + ".weight"
             weight = state_dict.get(weight_name)
             target_dtype = None
             weight_type = getattr(weight, "tensor_type", None) if torch.is_tensor(weight) else None

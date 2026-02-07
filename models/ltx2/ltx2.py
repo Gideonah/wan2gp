@@ -60,7 +60,7 @@ def _normalize_config(config_value):
 
 
 def _load_config_from_checkpoint(path):
-    from mmgp import safetensors2
+    from mmgp import quant_router
 
     if isinstance(path, (list, tuple)):
         if not path:
@@ -68,7 +68,7 @@ def _load_config_from_checkpoint(path):
         path = path[0]
     if not path:
         return {}
-    _, metadata = safetensors2.load_metadata_state_dict(path)
+    _, metadata = quant_router.load_metadata_state_dict(path)
     if not metadata:
         return {}
     return _normalize_config(metadata.get("config"))
@@ -644,6 +644,7 @@ class LTX2:
         image_end=None,
         sampling_steps: int = 40,
         guide_scale: float = 4.0,
+        alt_guide_scale: float = 1.0,
         frame_num: int = 121,
         height: int = 1024,
         width: int = 1536,
@@ -670,6 +671,17 @@ class LTX2:
         return_latent_slice = kwargs.get("return_latent_slice")
         video_prompt_type = kwargs.get("video_prompt_type") or ""
         denoising_strength = kwargs.get("denoising_strength")
+        cfg_star_switch = kwargs.get("cfg_star_switch", 0)
+        apg_switch = kwargs.get("apg_switch", 0)
+        slg_switch = kwargs.get("slg_switch", 0)
+        slg_layers = kwargs.get("slg_layers")
+        slg_start = kwargs.get("slg_start", 0.0)
+        slg_end = kwargs.get("slg_end", 1.0)
+        self_refiner_setting = kwargs.get("self_refiner_setting", 0)
+        self_refiner_plan = kwargs.get("self_refiner_plan", "")
+        self_refiner_f_uncertainty = kwargs.get("self_refiner_f_uncertainty", 0.1)
+        self_refiner_certain_percentage = kwargs.get("self_refiner_certain_percentage", 0.999)
+        self_refiner_max_plans = int(self.model_def.get("self_refiner_max_plans", 1))
 
         def _get_frame_dim(video_tensor: torch.Tensor) -> int | None:
             if video_tensor.dim() < 2:
@@ -947,6 +959,13 @@ class LTX2:
                 frame_rate=float(fps),
                 num_inference_steps=int(sampling_steps),
                 cfg_guidance_scale=float(guide_scale),
+                cfg_star_switch=cfg_star_switch,
+                apg_switch=apg_switch,
+                slg_switch=slg_switch,
+                slg_layers=slg_layers,
+                slg_start=slg_start,
+                slg_end=slg_end,
+                alt_guidance_scale=float(alt_guide_scale),
                 images=images,
                 guiding_images=guiding_images or None,
                 images_stage2=images_stage2 if stage2_override else None,
@@ -962,6 +981,11 @@ class LTX2:
                 masking_source=masking_source,
                 masking_strength=masking_strength,
                 return_latent_slice=return_latent_slice,
+                self_refiner_setting=self_refiner_setting,
+                self_refiner_plan=self_refiner_plan,
+                self_refiner_f_uncertainty=self_refiner_f_uncertainty,
+                self_refiner_certain_percentage=self_refiner_certain_percentage,
+                self_refiner_max_plans=self_refiner_max_plans,
             )
         else:
             pipeline_output = self.pipeline(
@@ -972,6 +996,7 @@ class LTX2:
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
                 images=images,
+                alt_guidance_scale=float(alt_guide_scale),
                 video_conditioning=video_conditioning,
                 latent_conditioning_stage2=latent_conditioning_stage2,
                 tiling_config=tiling_config,
@@ -984,6 +1009,11 @@ class LTX2:
                 masking_source=masking_source,
                 masking_strength=masking_strength,
                 return_latent_slice=return_latent_slice,
+                self_refiner_setting=self_refiner_setting,
+                self_refiner_plan=self_refiner_plan,
+                self_refiner_f_uncertainty=self_refiner_f_uncertainty,
+                self_refiner_certain_percentage=self_refiner_certain_percentage,
+                self_refiner_max_plans=self_refiner_max_plans,
             )
 
         latent_slice = None

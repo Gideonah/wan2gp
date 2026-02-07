@@ -94,6 +94,8 @@ class family_handler:
             "output_audio_is_input_audio": True,
             "custom_denoising_strength": True,
             "profiles_dir": ["ltx2_19B"],
+            "self_refiner": True,
+            "self_refiner_max_plans": 2,
         }
         extra_model_def["extra_control_frames"] = 1
         extra_model_def["dont_cat_preguide"] = True
@@ -127,6 +129,15 @@ class family_handler:
                     "no_negative_prompt": True,
                 }
             )
+        else:
+            extra_model_def.update(
+                {
+                    "adaptive_projected_guidance": True,
+                    "cfg_star": True,
+                    "skip_layer_guidance": True,
+                    "alt_guidance": "Modality Guidance",
+                }
+            )
         extra_model_def["guidance_max_phases"] = 2
         extra_model_def["visible_phases"] = 0 if distilled else 1
         extra_model_def["lock_guidance_phases"] = True
@@ -139,17 +150,17 @@ class family_handler:
         return get_rgb_factors("ltx2")
 
     @staticmethod
-    def register_lora_cli_args(parser):
+    def register_lora_cli_args(parser, lora_root):
         parser.add_argument(
             "--lora-dir-ltx2",
             type=str,
-            default=os.path.join("loras", "ltx2"),
-            help="Path to a directory that contains LTX-2 LoRAs",
+            default=None,
+            help=f"Path to a directory that contains LTX-2 LoRAs (default: {os.path.join(lora_root, 'ltx2')})",
         )
 
     @staticmethod
-    def get_lora_dir(base_model_type, args):
-        return args.lora_dir_ltx2
+    def get_lora_dir(base_model_type, args, lora_root):
+        return getattr(args, "lora_dir_ltx2", None) or os.path.join(lora_root, "ltx2")
 
     @staticmethod
     def get_vae_block_size(base_model_type):
@@ -265,6 +276,23 @@ class family_handler:
                 }
             )
 
+        if settings_version < 2.45:
+            ui_defaults.update(
+                {
+                    "alt_guidance_scale": 1.0,
+                    "slg_layers": [29],
+                }
+            )
+
+        if settings_version < 2.49:
+            ui_defaults.update(
+                {
+                    "self_refiner_plan": "2-8:3",
+                }
+            )
+
+                
+                
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
         ui_defaults.update(
@@ -274,9 +302,12 @@ class family_handler:
                 "denoising_strength": 1.0,
                 "masking_strength": 0,
                 "audio_prompt_type": "",
-            }
+                "alt_guidance_scale": 1.0,
+                "slg_layers": [29],
+	            }
         )
         ui_defaults.setdefault("audio_scale", 1.0)
+        ui_defaults.setdefault("alt_guidance_scale", 1.0)
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
         if pipeline_kind != "distilled":
             ui_defaults.setdefault("guidance_phases", 2)

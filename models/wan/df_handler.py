@@ -75,16 +75,16 @@ class family_handler():
         return {}
 
     @staticmethod
-    def register_lora_cli_args(parser):
+    def register_lora_cli_args(parser, lora_root):
         from .wan_handler import family_handler as wan_family_handler
 
-        return wan_family_handler.register_lora_cli_args(parser)
+        return wan_family_handler.register_lora_cli_args(parser, lora_root)
 
     @staticmethod
-    def get_lora_dir(base_model_type, args):
+    def get_lora_dir(base_model_type, args, lora_root):
         from .wan_handler import family_handler as wan_family_handler
 
-        return wan_family_handler.get_lora_dir(base_model_type, args)
+        return wan_family_handler.get_lora_dir(base_model_type, args, lora_root)
 
     @staticmethod
     def get_rgb_factors(base_model_type ):
@@ -98,7 +98,7 @@ class family_handler():
         return family_handler.query_model_files(computeList, base_model_type,  model_def)
     
     @staticmethod
-    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized= False, submodel_no_list = None, text_encoder_filename = None):
+    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized= False, submodel_no_list = None, text_encoder_filename = None, **kwargs):
         from .configs import WAN_CONFIGS
         cfg = WAN_CONFIGS['t2v-14B']
         from . import DTT2V
