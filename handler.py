@@ -30,8 +30,8 @@ Environment Variables:
     WAN2GP_MODEL_TYPE: Model to load (default: ltx2_distilled)
     WAN2GP_PROFILE: MMGP memory profile 1-6 (default: 3)
     WAN2GP_OUTPUT_DIR: Output directory (default: /workspace/outputs)
-    GCS_ENABLED: Enable GCS upload (default: true)
-    GCS_BUCKET_NAME: GCS bucket for video uploads
+    GCS_ENABLED: Enable GCS upload (default: false)
+    GCS_BUCKET_NAME: GCS bucket for video uploads (only used if GCS_ENABLED=true)
 """
 
 import os
@@ -70,7 +70,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # GCS Configuration
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "serverless_media_outputs")
-GCS_ENABLED = os.environ.get("GCS_ENABLED", "true").lower() == "true"
+GCS_ENABLED = os.environ.get("GCS_ENABLED", "false").lower() == "true"
 GCS_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", None)
 GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
 
@@ -614,24 +614,13 @@ def handler(job):
             fps=fps,
         )
 
-        # Upload to GCS
+        # Return local file path directly (no GCS upload)
         filename = Path(output_path).name
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
-
-        if gcs_success:
-            video_url = gcs_url
-        else:
-            print(f"⚠️ GCS upload failed: {gcs_error}")
-            # Return base64 encoded video as fallback
-            with open(output_path, "rb") as f:
-                video_base64 = base64.b64encode(f.read()).decode("utf-8")
-            video_url = f"data:video/mp4;base64,{video_base64[:100]}..."  # Truncated for response
-            # Note: Full base64 would be too large, so we indicate it's available locally
 
         return {
             "status": "success",
             "job_id": filename.replace(".mp4", ""),
-            "video_url": video_url,
+            "video_url": str(output_path),
             "generation_time_seconds": round(gen_time, 2),
             "duration_seconds": metadata["duration"],
             "num_frames": metadata["num_frames"],

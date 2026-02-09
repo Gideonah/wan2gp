@@ -170,7 +170,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "serverless_media_outputs")
-GCS_ENABLED = os.environ.get("GCS_ENABLED", "true").lower() == "true"
+GCS_ENABLED = os.environ.get("GCS_ENABLED", "false").lower() == "true"
 GCS_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", None)
 # URL expiration in days for signed URLs
 GCS_URL_EXPIRATION_DAYS = int(os.environ.get("GCS_URL_EXPIRATION_DAYS", "7"))
@@ -2161,19 +2161,8 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
-        
-        if gcs_success:
-            # Use the GCS signed URL
-            full_url = gcs_url
-            # Clean up local file after successful upload
-            cleanup_local_file(output_path)
-        else:
-            # Fallback to local download URL (keep file for local serving)
-            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
-            base_url = str(http_request.base_url).rstrip("/")
-            full_url = f"{base_url}/download/{filename}"
+        # Return local file path directly (no GCS upload)
+        full_url = str(output_path)
         
         return GenerationResponse(
             status="success",
@@ -2334,19 +2323,8 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
-        
-        if gcs_success:
-            # Use the GCS signed URL
-            full_url = gcs_url
-            # Clean up local file after successful upload
-            cleanup_local_file(output_path)
-        else:
-            # Fallback to local download URL (keep file for local serving)
-            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
-            base_url = str(http_request.base_url).rstrip("/")
-            full_url = f"{base_url}/download/{filename}"
+        # Return local file path directly (no GCS upload)
+        full_url = str(output_path)
         
         return GenerationResponse(
             status="success",
@@ -2475,18 +2453,8 @@ async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: 
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
-        
-        if gcs_success:
-            full_url = gcs_url
-            # Clean up local file after successful upload
-            cleanup_local_file(output_path)
-        else:
-            # Fallback to local download URL (keep file for local serving)
-            print(f"⚠️ GCS upload failed, using local URL: {gcs_error}")
-            base_url = str(http_request.base_url).rstrip("/")
-            full_url = f"{base_url}/download/{filename}"
+        # Return local file path directly (no GCS upload)
+        full_url = str(output_path)
         
         # Account for RIFE upsampling in output frame count
         output_num_frames = num_frames
