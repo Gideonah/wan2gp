@@ -2161,8 +2161,9 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Return local file path directly (no GCS upload)
-        full_url = str(output_path)
+        # Return full download URL with server IP (no GCS upload)
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
@@ -2323,8 +2324,9 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Return local file path directly (no GCS upload)
-        full_url = str(output_path)
+        # Return full download URL with server IP (no GCS upload)
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
         
         return GenerationResponse(
             status="success",
@@ -2453,8 +2455,9 @@ async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: 
         filename = Path(output_path).name
         job_id = filename.replace(".mp4", "")
         
-        # Return local file path directly (no GCS upload)
-        full_url = str(output_path)
+        # Return full download URL with server IP (no GCS upload)
+        base_url = str(http_request.base_url).rstrip("/")
+        full_url = f"{base_url}/download/{filename}"
         
         # Account for RIFE upsampling in output frame count
         output_num_frames = num_frames
