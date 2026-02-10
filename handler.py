@@ -30,8 +30,15 @@ Environment Variables:
     WAN2GP_MODEL_TYPE: Model to load (default: ltx2_distilled)
     WAN2GP_PROFILE: MMGP memory profile 1-6 (default: 3)
     WAN2GP_OUTPUT_DIR: Output directory (default: /workspace/outputs)
-    GCS_ENABLED: Enable GCS upload (default: true)
+    
+    GCS Upload:
+    GCS_ENABLED: Enable GCS upload (default: false)
     GCS_BUCKET_NAME: GCS bucket for video uploads
+    
+    GCS Authentication (pick one method):
+    1. GCS_SERVICE_ACCOUNT_JSON: Full JSON key as string (easiest for testing)
+    2. GCP_CLIENT_EMAIL + GCP_PRIVATE_KEY_B64: Individual env vars (secure)
+    3. GOOGLE_APPLICATION_CREDENTIALS: Path to JSON key file
 """
 
 import os
@@ -69,6 +76,7 @@ OUTPUT_DIR = Path(os.environ.get("WAN2GP_OUTPUT_DIR", "/workspace/outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # GCS Configuration
+# Auth methods (priority): GCS_SERVICE_ACCOUNT_JSON > GCP env vars > GOOGLE_APPLICATION_CREDENTIALS > ADC
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "serverless_media_outputs")
 GCS_ENABLED = os.environ.get("GCS_ENABLED", "false").lower() == "true"
 GCS_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", None)
@@ -183,18 +191,52 @@ def get_gcp_credentials():
 
 
 def get_gcs_client():
-    """Get or create GCS client."""
+    """
+    Get or create GCS client.
+    
+    Tries credentials in this order:
+    1. GCS_SERVICE_ACCOUNT_JSON env var (JSON string)
+    2. GCP env vars (GCP_CLIENT_EMAIL, GCP_PRIVATE_KEY_B64)
+    3. GOOGLE_APPLICATION_CREDENTIALS env var (JSON file path)
+    4. Application Default Credentials
+    """
     global _gcs_client
     if _gcs_client is None:
         try:
             from google.cloud import storage
+            from google.oauth2 import service_account
+            import json
 
+            # Method 1: Direct JSON string from env var (for testing/development)
+            json_key_string = os.environ.get("GCS_SERVICE_ACCOUNT_JSON")
+            if json_key_string:
+                try:
+                    credentials_info = json.loads(json_key_string)
+                    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                    _gcs_client = storage.Client(project=GCS_PROJECT_ID, credentials=credentials)
+                    print(f"✅ GCS client initialized from GCS_SERVICE_ACCOUNT_JSON")
+                    return _gcs_client
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Failed to parse GCS_SERVICE_ACCOUNT_JSON: {e}")
+
+            # Method 2: Individual env vars
             credentials = get_gcp_credentials()
             if credentials:
                 _gcs_client = storage.Client(project=GCS_PROJECT_ID, credentials=credentials)
-            else:
+                print(f"✅ GCS client initialized from env vars (GCP_CLIENT_EMAIL, GCP_PRIVATE_KEY_B64)")
+                return _gcs_client
+
+            # Method 3: JSON file path
+            json_key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if json_key_path and os.path.exists(json_key_path):
                 _gcs_client = storage.Client(project=GCS_PROJECT_ID)
-            print(f"✅ GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+                print(f"✅ GCS client initialized from GOOGLE_APPLICATION_CREDENTIALS: {json_key_path}")
+                return _gcs_client
+
+            # Method 4: Application Default Credentials (fallback)
+            _gcs_client = storage.Client(project=GCS_PROJECT_ID)
+            print(f"✅ GCS client initialized with Application Default Credentials")
+                
         except Exception as e:
             print(f"⚠️ GCS client not available: {e}")
             return None
