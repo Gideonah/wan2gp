@@ -30,8 +30,8 @@ Environment Variables:
     WAN2GP_MODEL_TYPE: Model to load (default: ltx2_distilled)
     WAN2GP_PROFILE: MMGP memory profile 1-6 (default: 3)
     WAN2GP_OUTPUT_DIR: Output directory (default: /workspace/outputs)
-    GCS_ENABLED: Enable GCS upload (default: false)
-    GCS_BUCKET_NAME: GCS bucket for video uploads (only used if GCS_ENABLED=true)
+    GCS_ENABLED: Enable GCS upload (default: true)
+    GCS_BUCKET_NAME: GCS bucket for video uploads
 """
 
 import os
@@ -614,13 +614,21 @@ def handler(job):
             fps=fps,
         )
 
-        # Return local file path directly (no GCS upload)
+        # Upload to GCS and return signed URL
         filename = Path(output_path).name
+        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+
+        if gcs_success:
+            video_url = gcs_url
+        else:
+            print(f"⚠️ GCS upload failed: {gcs_error}")
+            # Return local path as fallback if GCS fails
+            video_url = str(output_path)
 
         return {
             "status": "success",
             "job_id": filename.replace(".mp4", ""),
-            "video_url": str(output_path),
+            "video_url": video_url,
             "generation_time_seconds": round(gen_time, 2),
             "duration_seconds": metadata["duration"],
             "num_frames": metadata["num_frames"],
