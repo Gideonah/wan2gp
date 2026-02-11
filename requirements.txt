@@ -87,7 +87,10 @@ nltk
 
 # Cloud storage
 google-cloud-storage>=2.14.0
-
+fastapi 
+uvicorn 
+python-multipart 
+httpx
 
 
 # Optional / commented out
