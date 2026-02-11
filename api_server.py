@@ -549,13 +549,15 @@ class Wan22ImageToVideoRequest(BaseModel):
     width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
     
-    # Enhanced Lightning v2 defaults from i2v_2_2_Enhanced_Lightning_v2.json
-    num_inference_steps: int = Field(4, ge=4, le=30, description="Inference steps (4 for Lightning v2)")
-    guidance_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning v2)")
-    guidance2_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning v2)")
+    # Enhanced Lightning v2 defaults — matches Gradio /save_inputs_14
+    num_inference_steps: int = Field(8, ge=4, le=30, description="Inference steps (8 for SVI2Pro Lightning)")
+    guidance_scale: float = Field(1.0, ge=0.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning v2)")
+    guidance2_scale: float = Field(1.0, ge=0.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning v2)")
+    guidance3_scale: float = Field(5.0, ge=0.0, le=20.0, description="CFG scale phase 3")
     guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for Lightning v2)")
     model_switch_phase: int = Field(1, ge=1, le=2, description="Phase to switch models (1 for Lightning v2)")
     switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning v2)")
+    switch_threshold2: int = Field(0, ge=0, le=1000, description="Step threshold for phase 3 switch")
     flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning v2)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     
@@ -563,9 +565,9 @@ class Wan22ImageToVideoRequest(BaseModel):
     use_sliding_window: Optional[bool] = Field(None, description="Enable sliding window for long videos (auto-enabled if duration > 5s)")
     sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
     sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows")
-    sliding_window_overlap_noise: int = Field(20, ge=0, le=100, description="Noise added to overlapped frames to reduce stitching glitch (20 recommended for Lightning)")
-    color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows")
-    temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field("rife2", description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)")
+    sliding_window_overlap_noise: int = Field(0, ge=0, le=100, description="Noise added to overlapped frames (0 matches Gradio default)")
+    color_correction_strength: float = Field(0.0, ge=0.0, le=1.0, description="Color correction between windows (0 matches Gradio default)")
+    temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field("", description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)")
     
     class Config:
         json_schema_extra = {
@@ -604,25 +606,27 @@ class SVI2ProImageToVideoRequest(BaseModel):
     width: Optional[int] = Field(None, description="Video width (must be multiple of 16)")
     height: Optional[int] = Field(None, description="Video height (must be multiple of 16)")
     
-    # SVI2Pro Enhanced Lightning v2 defaults (from i2v_2_2_Enhanced_Lightning_v2_svi2pro.json)
+    # SVI2Pro Enhanced Lightning v2 defaults — matches Gradio /save_inputs_14
     num_inference_steps: int = Field(8, ge=4, le=30, description="Inference steps (8 for SVI2Pro Lightning)")
-    guidance_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning)")
-    guidance2_scale: float = Field(1.0, ge=1.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning)")
+    guidance_scale: float = Field(1.0, ge=0.0, le=10.0, description="CFG scale phase 1 (1.0 for Lightning)")
+    guidance2_scale: float = Field(1.0, ge=0.0, le=10.0, description="CFG scale phase 2 (1.0 for Lightning)")
+    guidance3_scale: float = Field(5.0, ge=0.0, le=20.0, description="CFG scale phase 3")
     guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for Lightning)")
     model_switch_phase: int = Field(1, ge=1, le=2, description="Phase to switch models (1 for Lightning)")
     switch_threshold: int = Field(900, ge=0, le=1000, description="Step threshold to switch phases (900 for Lightning)")
+    switch_threshold2: int = Field(0, ge=0, le=1000, description="Step threshold for phase 3 switch")
     flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 for Lightning)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     
-    # Sliding window settings
+    # Sliding window settings — defaults match Gradio
     sliding_window_size: int = Field(81, ge=33, le=257, description="Frames per sliding window (81 default)")
     sliding_window_overlap: int = Field(4, ge=1, le=16, description="Overlap frames between windows (4 for SVI2Pro)")
-    sliding_window_overlap_noise: int = Field(20, ge=0, le=100, description="Noise added to overlapped frames to reduce stitching glitch (20 recommended)")
-    color_correction_strength: float = Field(1.0, ge=0.0, le=1.0, description="Color correction between windows (1.0 recommended)")
+    sliding_window_overlap_noise: int = Field(0, ge=0, le=100, description="Noise added to overlapped frames (0 matches Gradio default)")
+    color_correction_strength: float = Field(0.0, ge=0.0, le=1.0, description="Color correction between windows (0 matches Gradio default)")
     
     # Post-processing
     temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field(
-        "rife2",
+        "",
         description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)"
     )
     
@@ -1709,17 +1713,19 @@ def generate_video_sliding_window_internal(
     num_inference_steps: int = 8,
     guidance_scale: float = 1.0,
     guidance2_scale: float = 1.0,
+    guidance3_scale: float = 5.0,
     guidance_phases: int = 2,
     model_switch_phase: int = 1,
     switch_threshold: int = 900,
+    switch_threshold2: int = 0,
     flow_shift: float = 5.0,
     seed: int = -1,
     fps: int = 16,
     sliding_window_size: int = 81,
     sliding_window_overlap: int = 4,
-    sliding_window_overlap_noise: int = 20,
-    color_correction_strength: float = 1.0,
-    temporal_upsampling: str = "rife2",
+    sliding_window_overlap_noise: int = 0,
+    color_correction_strength: float = 0.0,
+    temporal_upsampling: str = "",
 ) -> tuple[str, float, dict]:
     """
     Generate video using sliding window technique for long videos.
@@ -1863,7 +1869,9 @@ def generate_video_sliding_window_internal(
                 "guide_phases": guidance_phases,
                 "model_switch_phase": model_switch_phase,
                 "switch_threshold": switch_threshold,
+                "switch2_threshold": switch_threshold2,
                 "guide2_scale": guidance2_scale,
+                "guide3_scale": guidance3_scale,
                 "sample_solver": "unipc",
                 "causal_block_size": 5,
                 "causal_attention": True,
@@ -2373,9 +2381,11 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
                 num_inference_steps=request.num_inference_steps,
                 guidance_scale=request.guidance_scale,
                 guidance2_scale=request.guidance2_scale,
+                guidance3_scale=request.guidance3_scale,
                 guidance_phases=request.guidance_phases,
                 model_switch_phase=request.model_switch_phase,
                 switch_threshold=request.switch_threshold,
+                switch_threshold2=request.switch_threshold2,
                 flow_shift=request.flow_shift,
                 seed=request.seed,
                 fps=base_fps,
@@ -2412,6 +2422,7 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
                 num_inference_steps=request.num_inference_steps,
                 guidance_scale=request.guidance_scale,
                 guidance2_scale=request.guidance2_scale,
+                guidance3_scale=request.guidance3_scale,
                 guidance_phases=request.guidance_phases,
                 model_switch_phase=request.model_switch_phase,
                 switch_threshold=request.switch_threshold,
@@ -2549,9 +2560,11 @@ async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: 
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
             guidance2_scale=request.guidance2_scale,
+            guidance3_scale=request.guidance3_scale,
             guidance_phases=request.guidance_phases,
             model_switch_phase=request.model_switch_phase,
             switch_threshold=request.switch_threshold,
+            switch_threshold2=request.switch_threshold2,
             flow_shift=request.flow_shift,
             seed=request.seed,
             fps=base_fps,
