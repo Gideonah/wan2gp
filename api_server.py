@@ -501,8 +501,16 @@ class LTX2ImageToVideoRequest(BaseModel):
     height: Optional[int] = Field(None, description="Video height (must be multiple of 64)")
     
     guidance_scale: float = Field(4.0, ge=1.0, le=10.0, description="Classifier-free guidance scale")
+    embedded_guidance_scale: float = Field(6.0, ge=1.0, le=20.0, description="Embedded guidance scale (passed through to model)")
     input_video_strength: float = Field(1.0, ge=0.0, le=1.0, description="Image/source video strength (lower values = more motion, 1.0 = faithful to input)")
     num_inference_steps: int = Field(40, ge=8, le=100, description="Number of inference steps (40 for dev model with LoRA)")
+    flow_shift: float = Field(5.0, ge=1.0, le=15.0, description="Flow shift parameter (5.0 default for LTX-2 dev)")
+    guidance_phases: int = Field(2, ge=1, le=3, description="Number of guidance phases (2 for dev model)")
+    guidance2_scale: float = Field(5.0, ge=1.0, le=20.0, description="Guidance scale for phase 2")
+    guidance3_scale: float = Field(5.0, ge=1.0, le=20.0, description="Guidance scale for phase 3")
+    model_switch_phase: int = Field(1, ge=1, le=2, description="Phase at which to switch models")
+    switch_threshold: int = Field(0, ge=0, le=1000, description="Step threshold to switch phases")
+    alt_guidance_scale: float = Field(1.0, ge=0.0, le=20.0, description="Modality guidance scale")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     
     class Config:
@@ -513,8 +521,16 @@ class LTX2ImageToVideoRequest(BaseModel):
                 "duration": 5.0,
                 "resolution_preset": "720p",
                 "guidance_scale": 4.0,
+                "embedded_guidance_scale": 6.0,
                 "input_video_strength": 1.0,
                 "num_inference_steps": 40,
+                "flow_shift": 5.0,
+                "guidance_phases": 2,
+                "guidance2_scale": 5.0,
+                "guidance3_scale": 5.0,
+                "model_switch_phase": 1,
+                "switch_threshold": 0,
+                "alt_guidance_scale": 1.0,
                 "seed": -1
             }
         }
@@ -1302,11 +1318,14 @@ def generate_video_internal(
     num_frames: int = 121,
     num_inference_steps: int = 8,
     guidance_scale: float = 4.0,
+    embedded_guidance_scale: Optional[float] = None,
     guidance2_scale: Optional[float] = None,
+    guidance3_scale: Optional[float] = None,
     guidance_phases: int = 1,
     model_switch_phase: int = 1,
     switch_threshold: int = 0,
     flow_shift: Optional[float] = None,
+    alt_guidance_scale: float = 1.0,
     input_video_strength: float = 1.0,
     seed: int = -1,
     fps: int = 24,
@@ -1388,7 +1407,7 @@ def generate_video_internal(
     #     vae_tile_size = 256
     #     print(f"   Enabling VAE tiling (tile_size=256) for large generation")
     
-    # Build generation kwargs
+    # Build generation kwargs — matches wgp.py line 6322-6400 (wan_model.generate() call)
     gen_kwargs = {
         "input_prompt": prompt,
         "n_prompt": negative_prompt if negative_prompt else None,
@@ -1407,6 +1426,25 @@ def generate_video_internal(
         "input_video_strength": input_video_strength,  # For LTX2: controls motion vs faithfulness to input
     }
     
+    # Passthrough parameters that wgp.py always sends to model.generate()
+    # For LTX2 these flow into **kwargs; for Wan2.2 they're used directly
+    if flow_shift is not None:
+        gen_kwargs["shift"] = flow_shift
+    if embedded_guidance_scale is not None:
+        gen_kwargs["embedded_guidance_scale"] = embedded_guidance_scale
+    if guidance3_scale is not None:
+        gen_kwargs["guide3_scale"] = guidance3_scale
+    gen_kwargs["alt_guide_scale"] = alt_guidance_scale
+    
+    # Dual-phase guidance parameters (wgp.py lines 6348-6353)
+    if guidance_phases >= 1:
+        gen_kwargs["guide_phases"] = guidance_phases
+        gen_kwargs["model_switch_phase"] = model_switch_phase
+        gen_kwargs["switch_threshold"] = switch_threshold
+        gen_kwargs["switch2_threshold"] = 0  # Matches Gradio default
+        if guidance2_scale is not None:
+            gen_kwargs["guide2_scale"] = guidance2_scale
+    
     # For Wan2.2 i2v models, pass the image as input_video (required for i2v_class flow)
     if input_video_tensor is not None:
         gen_kwargs["input_video"] = input_video_tensor
@@ -1423,20 +1461,6 @@ def generate_video_internal(
     elif image_start is not None and current_model_family not in ["wan22", "wan22_svi2pro"]:
         # For LTX2 and other models, pass PIL image as image_start
         gen_kwargs["image_start"] = image_start
-    
-    # Add Wan2.2 specific parameters
-    # NOTE: model.generate() uses "shift" not "flow_shift"
-    if flow_shift is not None:
-        gen_kwargs["shift"] = flow_shift
-    
-    # Add dual-phase guidance parameters for Wan2.2
-    # NOTE: model.generate() uses "guide_phases" not "guidance_phases", and "guide2_scale" not "guidance2_scale"
-    if guidance_phases >= 1:
-        gen_kwargs["guide_phases"] = guidance_phases
-        gen_kwargs["model_switch_phase"] = model_switch_phase
-        gen_kwargs["switch_threshold"] = switch_threshold
-        if guidance2_scale is not None:
-            gen_kwargs["guide2_scale"] = guidance2_scale
     
     # For WAN22 models, use unipc solver for better consistency
     if current_model_family in ["wan22", "wan22_svi2pro"]:
@@ -2192,10 +2216,15 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
             print(f"⚠️ {warning}")
             # Don't fail, but warn - VAE tiling may help
         
-        print(f"   Using LTX-2 Dev settings:")
+        print(f"   Using LTX-2 Dev settings (matching Gradio):")
         print(f"   - num_inference_steps: {request.num_inference_steps}")
         print(f"   - input_video_strength: {request.input_video_strength}")
         print(f"   - guidance_scale: {request.guidance_scale}")
+        print(f"   - embedded_guidance_scale: {request.embedded_guidance_scale}")
+        print(f"   - flow_shift: {request.flow_shift}")
+        print(f"   - guidance_phases: {request.guidance_phases}")
+        print(f"   - guidance2_scale: {request.guidance2_scale}")
+        print(f"   - alt_guidance_scale: {request.alt_guidance_scale}")
         print(f"   - attention_mode: {DETECTED_ATTENTION_MODE}")
         
         output_path, gen_time, metadata = generate_video_internal(
@@ -2206,6 +2235,14 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
             num_frames=num_frames,
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
+            embedded_guidance_scale=request.embedded_guidance_scale,
+            guidance2_scale=request.guidance2_scale,
+            guidance3_scale=request.guidance3_scale,
+            guidance_phases=request.guidance_phases,
+            model_switch_phase=request.model_switch_phase,
+            switch_threshold=request.switch_threshold,
+            flow_shift=request.flow_shift,
+            alt_guidance_scale=request.alt_guidance_scale,
             input_video_strength=request.input_video_strength,
             seed=request.seed,
             fps=LTX2_FPS,
