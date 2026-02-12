@@ -30,7 +30,7 @@
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
-FROM vastai/pytorch:cuda-13.0.2-auto
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
 
@@ -38,7 +38,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 # System dependencies (minimal install)
-
+RUN apt update && \
+    apt install -y --no-install-recommends \
+    python3 python3-pip git wget curl cmake ninja-build \
+    libgl1 libglib2.0-0 ffmpeg ca-certificates && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /workspace
 
@@ -48,9 +53,10 @@ WORKDIR /workspace
 
 COPY requirements.txt .
 
-
+RUN pip install --upgrade pip setuptools wheel
 
 # Install PyTorch with CUDA support FIRST (required for packages with CUDA extensions)
+RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
 
 RUN pip install -r requirements.txt
 
