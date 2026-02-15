@@ -2043,6 +2043,10 @@ class _Job:
     status: str = "pending"             # pending → processing → completed / failed
     result: dict | None = None
     created_at: float = dataclass_field(default_factory=time.time)
+    # Progress tracking
+    stage: str = "queued"               # queued → fetching_image → generating → uploading → done
+    progress_pct: int = 0               # 0-100
+    started_at: float | None = None     # When processing actually began
 
 
 class _JobStore:
@@ -2087,14 +2091,25 @@ class _JobStore:
                 job.status = "failed"
                 job.result = {"status": "error", "message": error}
 
+    def update_progress(self, job_id: str, stage: str, pct: int):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.stage = stage
+                job.progress_pct = min(pct, 100)
+
     def get(self, job_id: str) -> dict | None:
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
                 return None
+            elapsed = round(time.time() - (job.started_at or job.created_at), 1)
             return {
                 "job_id": job.job_id,
                 "status": job.status,
+                "stage": job.stage,
+                "progress_pct": job.progress_pct,
+                "elapsed_seconds": elapsed,
                 "result": job.result,
                 "created_at": job.created_at,
             }
@@ -2145,23 +2160,30 @@ def _process_job(job: _Job) -> dict:
     endpoint = job.endpoint
     p = job.payload  # shorthand
 
+    def _progress(stage: str, pct: int):
+        _job_store.update_progress(job.job_id, stage, pct)
+
     # ── LTX-2 I2V ────────────────────────────────────────────────────────
     if endpoint == "ltx2/i2v":
         if model_instance is None or current_model_family != "ltx2":
             return {"status": "error", "message": "ltx2 model not loaded"}
 
+        _progress("preparing", 5)
         width, height = resolve_resolution(
             "ltx2",
             resolution_preset=p.get("resolution_preset"),
             width=p.get("width"),
             height=p.get("height"),
         )
+
+        _progress("fetching_image", 10)
         image_start = _fetch_image_sync(p["image_url"])
         image_start = image_start.resize((width, height), Image.LANCZOS)
 
         num_frames = duration_to_frames_ltx2(p.get("duration", 3.0))
         actual_duration = frames_to_duration(num_frames, LTX2_FPS)
 
+        _progress("generating", 15)
         output_path, gen_time, metadata = generate_video_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
@@ -2182,6 +2204,7 @@ def _process_job(job: _Job) -> dict:
             seed=p.get("seed", -1),
             fps=LTX2_FPS,
         )
+        _progress("uploading", 90)
 
         filename = Path(output_path).name
         gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
@@ -2191,6 +2214,7 @@ def _process_job(job: _Job) -> dict:
         else:
             full_url = f"http://localhost:{API_PORT}/download/{filename}"
 
+        _progress("done", 100)
         return {
             "status": "success",
             "job_id": job.job_id,
@@ -2209,6 +2233,7 @@ def _process_job(job: _Job) -> dict:
         if model_instance is None:
             return {"status": "error", "message": "wan22 model not loaded"}
 
+        _progress("preparing", 5)
         resolution_preset = p.get("resolution_preset", "480p")
         width, height = resolve_resolution(
             "wan22",
@@ -2216,6 +2241,8 @@ def _process_job(job: _Job) -> dict:
             width=p.get("width"),
             height=p.get("height"),
         )
+
+        _progress("fetching_image", 10)
         image_start = _fetch_image_sync(p["image_url"])
         image_start = image_start.resize((width, height), Image.LANCZOS)
 
@@ -2223,6 +2250,7 @@ def _process_job(job: _Job) -> dict:
         fps = 16
         num_frames = max(1, round(duration_val * fps)) | 1  # ensure odd
 
+        _progress("generating", 15)
         output_path, gen_time, metadata = generate_video_sliding_window_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
@@ -2246,6 +2274,7 @@ def _process_job(job: _Job) -> dict:
             fps=fps,
             rife_passes=p.get("rife_passes", 1),
         )
+        _progress("uploading", 90)
 
         filename = Path(output_path).name
         gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
@@ -2255,6 +2284,7 @@ def _process_job(job: _Job) -> dict:
         else:
             full_url = f"http://localhost:{API_PORT}/download/{filename}"
 
+        _progress("done", 100)
         return {
             "status": "success",
             "job_id": job.job_id,
@@ -2286,7 +2316,8 @@ def _job_worker():
             continue
 
         print(f"🎬 Processing job {job.job_id} ({job.endpoint})")
-        t0 = time.time()
+        job.started_at = time.time()
+        t0 = job.started_at
         try:
             result = _process_job(job)
             _job_store.complete(job.job_id, result)
@@ -3149,6 +3180,9 @@ class JobStatusResponse(BaseModel):
     """Response for /jobs/{job_id} polling endpoint."""
     job_id: str
     status: str             # pending / processing / completed / failed
+    stage: str = "queued"   # queued / preparing / fetching_image / generating / uploading / done
+    progress_pct: int = 0   # 0-100
+    elapsed_seconds: float = 0.0
     result: Optional[dict] = None
 
 
@@ -3209,9 +3243,10 @@ async def get_job_status(job_id: str):
     """
     Poll for the status of a submitted job.
 
-    Returns ``pending`` / ``processing`` / ``completed`` / ``failed``.
-    When ``completed``, the ``result`` field contains the full generation
-    response (same schema as the synchronous endpoint).
+    Returns ``pending`` / ``processing`` / ``completed`` / ``failed``
+    plus ``stage`` and ``progress_pct`` for real-time progress tracking.
+
+    Stages: queued → preparing → fetching_image → generating → uploading → done
     """
     info = _job_store.get(job_id)
     if info is None:
@@ -3219,6 +3254,9 @@ async def get_job_status(job_id: str):
     return JobStatusResponse(
         job_id=info["job_id"],
         status=info["status"],
+        stage=info["stage"],
+        progress_pct=info["progress_pct"],
+        elapsed_seconds=info["elapsed_seconds"],
         result=info["result"],
     )
 
