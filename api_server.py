@@ -2016,12 +2016,299 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Wan2GP Multi-Model API",
     description="REST API for Z-Image, LTX-2, and Wan2.2 generation",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
 
 # Mount outputs directory
 app.mount("/download", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASYNC JOB QUEUE — fire-and-forget submission with webhook callback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import threading
+import queue as _queue_mod
+from dataclasses import dataclass, field as dataclass_field
+
+@dataclass
+class _Job:
+    """Internal job representation for the async queue."""
+    job_id: str
+    endpoint: str                       # e.g. 'ltx2/i2v', 'wan22/i2v'
+    payload: dict                       # Original request body
+    callback_url: str | None = None
+    callback_secret: str = ""
+    status: str = "pending"             # pending → processing → completed / failed
+    result: dict | None = None
+    created_at: float = dataclass_field(default_factory=time.time)
+
+
+class _JobStore:
+    """Thread-safe in-memory job store + FIFO queue."""
+
+    def __init__(self):
+        self._queue: _queue_mod.Queue[str] = _queue_mod.Queue()
+        self._jobs: dict[str, _Job] = {}
+        self._lock = threading.Lock()
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def submit(self, job: _Job) -> str:
+        with self._lock:
+            self._jobs[job.job_id] = job
+        self._queue.put(job.job_id)
+        return job.job_id
+
+    def next(self) -> _Job | None:
+        """Block up to 1 s waiting for a job. Returns None on timeout."""
+        try:
+            job_id = self._queue.get(timeout=1)
+        except _queue_mod.Empty:
+            return None
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.status = "processing"
+            return job
+
+    def complete(self, job_id: str, result: dict):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.status = "completed"
+                job.result = result
+
+    def fail(self, job_id: str, error: str):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.status = "failed"
+                job.result = {"status": "error", "message": error}
+
+    def get(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            return {
+                "job_id": job.job_id,
+                "status": job.status,
+                "result": job.result,
+                "created_at": job.created_at,
+            }
+
+    def cleanup_old(self, max_age: float = 3600):
+        """Remove completed/failed jobs older than *max_age* seconds."""
+        now = time.time()
+        with self._lock:
+            to_delete = [
+                jid for jid, j in self._jobs.items()
+                if j.status in ("completed", "failed") and now - j.created_at > max_age
+            ]
+            for jid in to_delete:
+                del self._jobs[jid]
+
+
+# Module-level singleton
+_job_store = _JobStore()
+
+
+def _fire_callback(job: _Job):
+    """POST the result back to the caller's callback URL."""
+    if not job.callback_url:
+        return
+    headers = {"Content-Type": "application/json"}
+    if job.callback_secret:
+        headers["X-Callback-Secret"] = job.callback_secret
+    try:
+        resp = httpx.post(
+            job.callback_url,
+            json={
+                "job_id": job.job_id,
+                **(job.result or {}),
+            },
+            headers=headers,
+            timeout=15,
+        )
+        print(f"📤 Callback for {job.job_id} → {resp.status_code}")
+    except Exception as exc:
+        print(f"⚠️  Callback failed for {job.job_id}: {exc}")
+
+
+def _process_job(job: _Job) -> dict:
+    """
+    Run the actual generation for a submitted job.
+    Called from the background worker thread.
+    """
+    endpoint = job.endpoint
+    p = job.payload  # shorthand
+
+    # ── LTX-2 I2V ────────────────────────────────────────────────────────
+    if endpoint == "ltx2/i2v":
+        if model_instance is None or current_model_family != "ltx2":
+            return {"status": "error", "message": "ltx2 model not loaded"}
+
+        width, height = resolve_resolution(
+            "ltx2",
+            resolution_preset=p.get("resolution_preset"),
+            width=p.get("width"),
+            height=p.get("height"),
+        )
+        image_start = _fetch_image_sync(p["image_url"])
+        image_start = image_start.resize((width, height), Image.LANCZOS)
+
+        num_frames = duration_to_frames_ltx2(p.get("duration", 3.0))
+        actual_duration = frames_to_duration(num_frames, LTX2_FPS)
+
+        output_path, gen_time, metadata = generate_video_internal(
+            prompt=p.get("prompt", ""),
+            image_start=image_start,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_inference_steps=p.get("num_inference_steps", 40),
+            guidance_scale=p.get("guidance_scale", 4.0),
+            embedded_guidance_scale=p.get("embedded_guidance_scale", 1.0),
+            guidance2_scale=p.get("guidance2_scale", 1.0),
+            guidance3_scale=p.get("guidance3_scale", 1.0),
+            guidance_phases=p.get("guidance_phases", 1),
+            model_switch_phase=p.get("model_switch_phase", 1),
+            switch_threshold=p.get("switch_threshold", 900),
+            flow_shift=p.get("flow_shift", 9.0),
+            alt_guidance_scale=p.get("alt_guidance_scale", 0.0),
+            input_video_strength=p.get("input_video_strength", 1.0),
+            seed=p.get("seed", -1),
+            fps=LTX2_FPS,
+        )
+
+        filename = Path(output_path).name
+        gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
+        if gcs_ok:
+            full_url = gcs_url
+            cleanup_local_file(output_path)
+        else:
+            full_url = f"http://localhost:{API_PORT}/download/{filename}"
+
+        return {
+            "status": "success",
+            "job_id": job.job_id,
+            "output_url": full_url,
+            "video_url": full_url,
+            "generation_time_seconds": round(gen_time, 2),
+            "duration_seconds": actual_duration,
+            "num_frames": num_frames,
+            "width": metadata["width"],
+            "height": metadata["height"],
+            "seed": metadata["seed"],
+        }
+
+    # ── WAN2.2 I2V ───────────────────────────────────────────────────────
+    if endpoint == "wan22/i2v":
+        if model_instance is None:
+            return {"status": "error", "message": "wan22 model not loaded"}
+
+        resolution_preset = p.get("resolution_preset", "480p")
+        width, height = resolve_resolution(
+            "wan22",
+            resolution_preset=resolution_preset,
+            width=p.get("width"),
+            height=p.get("height"),
+        )
+        image_start = _fetch_image_sync(p["image_url"])
+        image_start = image_start.resize((width, height), Image.LANCZOS)
+
+        duration_val = float(p.get("duration", 3.0))
+        fps = 16
+        num_frames = max(1, round(duration_val * fps)) | 1  # ensure odd
+
+        output_path, gen_time, metadata = generate_video_sliding_window_internal(
+            prompt=p.get("prompt", ""),
+            image_start=image_start,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_inference_steps=p.get("num_inference_steps", 8),
+            guidance_scale=p.get("guidance_scale", 1.0),
+            guidance2_scale=p.get("guidance2_scale", 1.0),
+            guidance3_scale=p.get("guidance3_scale", 5.0),
+            guidance_phases=p.get("guidance_phases", 2),
+            model_switch_phase=p.get("model_switch_phase", 1),
+            switch_threshold=p.get("switch_threshold", 900),
+            switch_threshold2=p.get("switch_threshold2", 0),
+            flow_shift=p.get("flow_shift", 5.0),
+            sliding_window_size=p.get("sliding_window_size", 81),
+            sliding_window_overlap=p.get("sliding_window_overlap", 4),
+            sliding_window_overlap_noise=p.get("sliding_window_overlap_noise", 0),
+            color_correction_strength=p.get("color_correction_strength", 0.0),
+            seed=p.get("seed", -1),
+            fps=fps,
+            rife_passes=p.get("rife_passes", 1),
+        )
+
+        filename = Path(output_path).name
+        gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
+        if gcs_ok:
+            full_url = gcs_url
+            cleanup_local_file(output_path)
+        else:
+            full_url = f"http://localhost:{API_PORT}/download/{filename}"
+
+        return {
+            "status": "success",
+            "job_id": job.job_id,
+            "output_url": full_url,
+            "video_url": full_url,
+            "generation_time_seconds": round(gen_time, 2),
+            "num_frames": metadata.get("num_frames", num_frames),
+            "width": metadata["width"],
+            "height": metadata["height"],
+            "seed": metadata["seed"],
+        }
+
+    return {"status": "error", "message": f"Unknown endpoint: {endpoint}"}
+
+
+def _fetch_image_sync(url: str) -> Image.Image:
+    """Synchronous image fetch for the background worker thread."""
+    resp = httpx.get(url, timeout=30, follow_redirects=True)
+    resp.raise_for_status()
+    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+
+
+def _job_worker():
+    """Background daemon that processes submitted jobs one at a time."""
+    print("🔄 Job worker thread started")
+    while True:
+        job = _job_store.next()
+        if job is None:
+            continue
+
+        print(f"🎬 Processing job {job.job_id} ({job.endpoint})")
+        t0 = time.time()
+        try:
+            result = _process_job(job)
+            _job_store.complete(job.job_id, result)
+            print(f"✅ Job {job.job_id} completed in {time.time()-t0:.1f}s")
+        except Exception as exc:
+            traceback.print_exc()
+            _job_store.fail(job.job_id, str(exc))
+            print(f"❌ Job {job.job_id} failed: {exc}")
+
+        # Always try the callback
+        job_info = _job_store.get(job.job_id)
+        if job_info:
+            job.result = job_info["result"]
+        _fire_callback(job)
+
+        # Periodic cleanup of old finished jobs
+        _job_store.cleanup_old()
+
+
+# Start the worker daemon thread at import time
+_worker_thread = threading.Thread(target=_job_worker, daemon=True, name="job-worker")
+_worker_thread.start()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2848,6 +3135,95 @@ async def reload_model(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS: ASYNC SUBMIT (fire-and-forget with webhook callback)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SubmitResponse(BaseModel):
+    """Response returned immediately when a job is submitted."""
+    status: str             # "accepted"
+    job_id: str
+    message: str = ""
+
+
+class JobStatusResponse(BaseModel):
+    """Response for /jobs/{job_id} polling endpoint."""
+    job_id: str
+    status: str             # pending / processing / completed / failed
+    result: Optional[dict] = None
+
+
+@app.post("/submit/ltx2/i2v", response_model=SubmitResponse)
+async def submit_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Request):
+    """
+    Submit an LTX-2 I2V job for async processing.
+
+    The job is queued and processed in the background. When complete the
+    result is POSTed to ``callback_url`` (if provided in the JSON body)
+    and is available via ``GET /jobs/{job_id}``.
+
+    Extra JSON fields (not in LTX2ImageToVideoRequest):
+        callback_url:    URL to POST the result to
+        callback_secret: shared secret sent in X-Callback-Secret header
+        job_id:          optional caller-provided job ID
+    """
+    body = await http_request.json()
+    job_id = body.get("job_id") or str(uuid.uuid4())[:12]
+
+    job = _Job(
+        job_id=job_id,
+        endpoint="ltx2/i2v",
+        payload=body,
+        callback_url=body.get("callback_url"),
+        callback_secret=body.get("callback_secret", ""),
+    )
+    _job_store.submit(job)
+    print(f"📥 Submitted job {job_id} (ltx2/i2v), queue depth: {_job_store._queue.qsize()}")
+
+    return SubmitResponse(status="accepted", job_id=job_id, message="Job queued for processing")
+
+
+@app.post("/submit/wan22/i2v", response_model=SubmitResponse)
+async def submit_wan22_i2v(request: Union[Wan22ImageToVideoRequest, SVI2ProImageToVideoRequest], http_request: Request):
+    """
+    Submit a Wan2.2 I2V job for async processing.
+    See /submit/ltx2/i2v for callback/job_id details.
+    """
+    body = await http_request.json()
+    job_id = body.get("job_id") or str(uuid.uuid4())[:12]
+
+    job = _Job(
+        job_id=job_id,
+        endpoint="wan22/i2v",
+        payload=body,
+        callback_url=body.get("callback_url"),
+        callback_secret=body.get("callback_secret", ""),
+    )
+    _job_store.submit(job)
+    print(f"📥 Submitted job {job_id} (wan22/i2v), queue depth: {_job_store._queue.qsize()}")
+
+    return SubmitResponse(status="accepted", job_id=job_id, message="Job queued for processing")
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str):
+    """
+    Poll for the status of a submitted job.
+
+    Returns ``pending`` / ``processing`` / ``completed`` / ``failed``.
+    When ``completed``, the ``result`` field contains the full generation
+    response (same schema as the synchronous endpoint).
+    """
+    info = _job_store.get(job_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return JobStatusResponse(
+        job_id=info["job_id"],
+        status=info["status"],
+        result=info["result"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2869,13 +3245,13 @@ def main():
 ║  Output Dir: {str(OUTPUT_DIR):<60} ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Endpoints:                                                                   ║
-║    POST /generate/image       - Z-Image text-to-image                         ║
-║    POST /generate/ltx2/i2v    - LTX-2 image-to-video                          ║
-║    POST /generate/wan22/i2v   - Wan2.2 Lightning v2 image-to-video            ║
-║    POST /generate/wan22/i2v - WAN22 I2V (sliding window, RIFE x2)             ║
+║    POST /generate/ltx2/i2v    - LTX-2 image-to-video (sync)                   ║
+║    POST /generate/wan22/i2v   - Wan2.2 image-to-video (sync)                  ║
+║    POST /submit/ltx2/i2v      - LTX-2 submit + callback (async)               ║
+║    POST /submit/wan22/i2v     - Wan2.2 submit + callback (async)              ║
+║    GET  /jobs/{job_id}        - Poll job status                               ║
 ║    POST /reload               - Switch model type                             ║
 ║    GET  /health               - Health check                                  ║
-║    GET  /info                 - API information                               ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
     """)
     
