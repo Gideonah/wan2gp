@@ -1333,8 +1333,14 @@ def generate_video_internal(
     input_video_strength: float = 1.0,
     seed: int = -1,
     fps: int = 24,
+    step_callback: object = None,
 ) -> tuple[str, float, dict]:
-    """Generate video using LTX-2 or Wan2.2 model"""
+    """Generate video using LTX-2 or Wan2.2 model.
+
+    Args:
+        step_callback: Optional callable(current_step: int, total_steps: int)
+                       called after each inference step for progress tracking.
+    """
     global model_instance, model_def, current_model_family
     
     if model_instance is None:
@@ -1384,6 +1390,8 @@ def generate_video_internal(
             steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
             extra = f" {denoising_extra}" if denoising_extra else ""
             print(f"   Step {step + 1}/{steps_display}{extra}")
+            if step_callback:
+                step_callback(step + 1, steps_display)
     
     # Convert image_start to tensor format for Wan2.2 i2v models
     # Wan2.2 i2v models expect input_video as a tensor with shape (C, T, H, W)
@@ -1726,6 +1734,7 @@ def generate_video_sliding_window_internal(
     sliding_window_overlap_noise: int = 0,
     color_correction_strength: float = 0.0,
     temporal_upsampling: str = "",
+    step_callback: object = None,
 ) -> tuple[str, float, dict]:
     """
     Generate video using sliding window technique for long videos.
@@ -1741,6 +1750,10 @@ def generate_video_sliding_window_internal(
     is recommended for Lightning LoRA models.
     
     Works with both Lightning and SVI2Pro models.
+    
+    Args:
+        step_callback: Optional callable(current_step: int, total_steps: int)
+                       called after each inference step for progress tracking.
     """
     global model_instance, model_def, current_model_family
     
@@ -1848,6 +1861,8 @@ def generate_video_sliding_window_internal(
                         steps_display = override_num_inference_steps if override_num_inference_steps else num_inference_steps
                         extra = f" {denoising_extra}" if denoising_extra else ""
                         print(f"   Step {step + 1}/{steps_display}{extra}")
+                        if step_callback:
+                            step_callback(step + 1, steps_display)
                 return video_progress_callback
             
             # Build kwargs for this window
@@ -2163,6 +2178,11 @@ def _process_job(job: _Job) -> dict:
     def _progress(stage: str, pct: int):
         _job_store.update_progress(job.job_id, stage, pct)
 
+    def _on_step(current_step: int, total_steps: int):
+        """Map inference step to 10-90% range (10% setup, 90% upload/done)."""
+        pct = 10 + int((current_step / total_steps) * 80)
+        _job_store.update_progress(job.job_id, f"generating {current_step}/{total_steps}", pct)
+
     # ── LTX-2 I2V ────────────────────────────────────────────────────────
     if endpoint == "ltx2/i2v":
         if model_instance is None or current_model_family != "ltx2":
@@ -2176,14 +2196,14 @@ def _process_job(job: _Job) -> dict:
             height=p.get("height"),
         )
 
-        _progress("fetching_image", 10)
+        _progress("fetching_image", 8)
         image_start = _fetch_image_sync(p["image_url"])
         image_start = image_start.resize((width, height), Image.LANCZOS)
 
         num_frames = duration_to_frames_ltx2(p.get("duration", 3.0))
         actual_duration = frames_to_duration(num_frames, LTX2_FPS)
 
-        _progress("generating", 15)
+        _progress("generating 0/?", 10)
         output_path, gen_time, metadata = generate_video_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
@@ -2203,6 +2223,7 @@ def _process_job(job: _Job) -> dict:
             input_video_strength=p.get("input_video_strength", 1.0),
             seed=p.get("seed", -1),
             fps=LTX2_FPS,
+            step_callback=_on_step,
         )
         _progress("uploading", 90)
 
@@ -2242,7 +2263,7 @@ def _process_job(job: _Job) -> dict:
             height=p.get("height"),
         )
 
-        _progress("fetching_image", 10)
+        _progress("fetching_image", 8)
         image_start = _fetch_image_sync(p["image_url"])
         image_start = image_start.resize((width, height), Image.LANCZOS)
 
@@ -2250,7 +2271,7 @@ def _process_job(job: _Job) -> dict:
         fps = 16
         num_frames = max(1, round(duration_val * fps)) | 1  # ensure odd
 
-        _progress("generating", 15)
+        _progress("generating 0/?", 10)
         output_path, gen_time, metadata = generate_video_sliding_window_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
@@ -2272,7 +2293,8 @@ def _process_job(job: _Job) -> dict:
             color_correction_strength=p.get("color_correction_strength", 0.0),
             seed=p.get("seed", -1),
             fps=fps,
-            rife_passes=p.get("rife_passes", 1),
+            temporal_upsampling=p.get("temporal_upsampling", ""),
+            step_callback=_on_step,
         )
         _progress("uploading", 90)
 
