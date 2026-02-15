@@ -3249,7 +3249,7 @@ def main():
 ║    POST /generate/wan22/i2v   - Wan2.2 image-to-video (sync)                  ║
 ║    POST /submit/ltx2/i2v      - LTX-2 submit + callback (async)               ║
 ║    POST /submit/wan22/i2v     - Wan2.2 submit + callback (async)              ║
-║    GET  /jobs/{job_id}        - Poll job status                               ║
+║    GET  /jobs/{{job_id}}        - Poll job status                               ║
 ║    POST /reload               - Switch model type                             ║
 ║    GET  /health               - Health check                                  ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
