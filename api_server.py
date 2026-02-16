@@ -2178,10 +2178,21 @@ def _process_job(job: _Job) -> dict:
     def _progress(stage: str, pct: int):
         _job_store.update_progress(job.job_id, stage, pct)
 
+    pass_index = 1
+    last_step = 0
     def _on_step(current_step: int, total_steps: int):
         """Map inference step to 10-90% range (10% setup, 90% upload/done)."""
+        nonlocal pass_index, last_step
+        if last_step > 0 and current_step <= last_step:
+            pass_index += 1
+
         pct = 10 + int((current_step / total_steps) * 80)
-        _job_store.update_progress(job.job_id, f"generating {current_step}/{total_steps}", pct)
+        if pass_index == 1:
+            stage = f"generating pass 1 {current_step}/{total_steps}"
+        else:
+            stage = f"generating pass {pass_index} (refinement) {current_step}/{total_steps}"
+        _job_store.update_progress(job.job_id, stage, pct)
+        last_step = current_step
 
     # ── LTX-2 I2V ────────────────────────────────────────────────────────
     if endpoint == "ltx2/i2v":
@@ -2203,7 +2214,7 @@ def _process_job(job: _Job) -> dict:
         num_frames = duration_to_frames_ltx2(p.get("duration", 3.0))
         actual_duration = frames_to_duration(num_frames, LTX2_FPS)
 
-        _progress("generating 0/?", 10)
+        _progress("generating pass 1 0/?", 10)
         output_path, gen_time, metadata = generate_video_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
@@ -2271,7 +2282,7 @@ def _process_job(job: _Job) -> dict:
         fps = 16
         num_frames = max(1, round(duration_val * fps)) | 1  # ensure odd
 
-        _progress("generating 0/?", 10)
+        _progress("generating pass 1 0/?", 10)
         output_path, gen_time, metadata = generate_video_sliding_window_internal(
             prompt=p.get("prompt", ""),
             image_start=image_start,
