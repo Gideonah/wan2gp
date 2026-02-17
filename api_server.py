@@ -304,44 +304,56 @@ def get_gcs_client():
             return None
     return _gcs_client
 
-def upload_to_gcs(local_path: str, gcs_filename: str = None, content_type: str = "video/mp4") -> tuple[bool, str, str]:
+def upload_to_gcs(
+    local_path: str,
+    gcs_filename: str = None,
+    content_type: str = "video/mp4",
+    target_bucket: str = None,
+    target_path: str = None,
+) -> tuple[bool, str, str, str]:
     """
-    Upload a file to GCS and return a signed URL.
+    Upload a file to GCS and return a signed URL + gcs_uri.
     
     Args:
         local_path: Path to the local file
         gcs_filename: Optional filename in GCS (defaults to local filename)
         content_type: MIME type of the file
+        target_bucket: Optional override bucket name (for direct-to-destination uploads)
+        target_path: Optional full GCS object path (overrides default videos/{filename} pattern)
         
     Returns:
-        tuple: (success, gcs_uri or signed_url, error_message)
+        tuple: (success, signed_url, gcs_uri, error_message)
     """
     if not GCS_ENABLED:
-        return False, None, "GCS upload disabled"
+        return False, None, None, "GCS upload disabled"
     
     client = get_gcs_client()
     if client is None:
-        return False, None, "GCS client not available"
+        return False, None, None, "GCS client not available"
     
     try:
         from datetime import timedelta
         
         local_path = Path(local_path)
         if not local_path.exists():
-            return False, None, f"File not found: {local_path}"
+            return False, None, None, f"File not found: {local_path}"
         
-        # Use provided filename or extract from path
-        filename = gcs_filename or local_path.name
-        gcs_path = f"videos/{filename}"
+        # Determine bucket and path
+        bucket_name = target_bucket or GCS_BUCKET_NAME
+        if target_path:
+            gcs_path = target_path
+        else:
+            filename = gcs_filename or local_path.name
+            gcs_path = f"videos/{filename}"
         
-        bucket = client.bucket(GCS_BUCKET_NAME)
+        bucket = client.bucket(bucket_name)
         blob = bucket.blob(gcs_path)
         
         # Set chunk size for large files
         blob.chunk_size = 8 * 1024 * 1024  # 8MB chunks
         
         # Upload with retry
-        print(f"📤 Uploading to GCS: gs://{GCS_BUCKET_NAME}/{gcs_path}")
+        print(f"📤 Uploading to GCS: gs://{bucket_name}/{gcs_path}")
         blob.upload_from_filename(str(local_path), content_type=content_type, timeout=600)
         
         # Generate signed URL
@@ -353,15 +365,78 @@ def upload_to_gcs(local_path: str, gcs_filename: str = None, content_type: str =
             response_disposition="inline",
         )
         
-        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{gcs_path}"
+        gcs_uri = f"gs://{bucket_name}/{gcs_path}"
         print(f"✅ Uploaded to GCS: {gcs_uri}")
         
-        return True, signed_url, None
+        return True, signed_url, gcs_uri, None
         
     except Exception as e:
         error_msg = f"GCS upload failed: {str(e)}"
         print(f"❌ {error_msg}")
-        return False, None, error_msg
+        return False, None, None, error_msg
+
+
+def generate_thumbnail_to_gcs(
+    local_video_path: str,
+    target_bucket: str = None,
+    target_path: str = None,
+) -> tuple[bool, str, str, str]:
+    """
+    Extract first frame from video and upload as JPEG thumbnail to GCS.
+    
+    Args:
+        local_video_path: Path to the local video file
+        target_bucket: Optional override bucket name
+        target_path: Optional full GCS object path for the thumbnail
+        
+    Returns:
+        tuple: (success, signed_url, gcs_uri, error_message)
+    """
+    try:
+        import cv2
+        import numpy as np
+        
+        cap = cv2.VideoCapture(str(local_video_path))
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            return False, None, None, "Failed to extract frame from video"
+        
+        # Resize to thumbnail
+        h, w = frame.shape[:2]
+        max_dim = 300
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        
+        # Encode as JPEG
+        _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        
+        # Write to temp file for upload
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp.write(buf.tobytes())
+            tmp_path = tmp.name
+        
+        try:
+            result = upload_to_gcs(
+                tmp_path,
+                content_type="image/jpeg",
+                target_bucket=target_bucket,
+                target_path=target_path,
+            )
+            return result
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+                
+    except ImportError:
+        return False, None, None, "cv2 not available for thumbnail generation"
+    except Exception as e:
+        return False, None, None, f"Thumbnail generation failed: {str(e)}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODEL-SPECIFIC CONSTANTS
@@ -476,6 +551,10 @@ class ZImageRequest(BaseModel):
     seed: int = Field(-1, description="Random seed (-1 for random)")
     batch_size: int = Field(1, ge=1, le=4, description="Number of images to generate")
     
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
+    
     class Config:
         json_schema_extra = {
             "example": {
@@ -512,6 +591,10 @@ class LTX2ImageToVideoRequest(BaseModel):
     switch_threshold: int = Field(0, ge=0, le=1000, description="Step threshold to switch phases")
     alt_guidance_scale: float = Field(1.0, ge=0.0, le=20.0, description="Modality guidance scale")
     seed: int = Field(-1, description="Random seed (-1 for random)")
+    
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
     
     class Config:
         json_schema_extra = {
@@ -568,6 +651,10 @@ class Wan22ImageToVideoRequest(BaseModel):
     sliding_window_overlap_noise: int = Field(0, ge=0, le=100, description="Noise added to overlapped frames (0 matches Gradio default)")
     color_correction_strength: float = Field(0.0, ge=0.0, le=1.0, description="Color correction between windows (0 matches Gradio default)")
     temporal_upsampling: Optional[Literal["", "rife2", "rife4"]] = Field("", description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)")
+    
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
     
     class Config:
         json_schema_extra = {
@@ -630,6 +717,10 @@ class SVI2ProImageToVideoRequest(BaseModel):
         description="RIFE temporal upsampling: '' (none), 'rife2' (2x fps), 'rife4' (4x fps)"
     )
     
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
+    
     class Config:
         json_schema_extra = {
             "example": {
@@ -658,6 +749,10 @@ class ImageToVideoRequest(BaseModel):
     guidance_scale: float = Field(4.0, description="Classifier-free guidance scale")
     seed: int = Field(-1, description="Random seed (-1 for random)")
 
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
+
 
 class TextToVideoRequest(BaseModel):
     """Request model for text-to-video generation"""
@@ -670,6 +765,10 @@ class TextToVideoRequest(BaseModel):
     guidance_scale: float = Field(4.0, description="Classifier-free guidance scale")
     seed: int = Field(-1, description="Random seed (-1 for random)")
 
+    # GCS Overrides
+    gcs_bucket: Optional[str] = Field(None, description="Target GCS bucket")
+    gcs_path: Optional[str] = Field(None, description="Target GCS object path")
+
 
 class GenerationResponse(BaseModel):
     """Response model for generation requests"""
@@ -679,6 +778,9 @@ class GenerationResponse(BaseModel):
     output_url: Optional[str] = None
     video_url: Optional[str] = None  # Alias for video responses
     image_url: Optional[str] = None  # Alias for image responses
+    gcs_uri: Optional[str] = None    # Direct gs:// URI
+    thumbnail_url: Optional[str] = None # Signed URL for thumbnail
+    thumbnail_gcs_uri: Optional[str] = None # Direct gs:// URI for thumbnail
     generation_time_seconds: Optional[float] = None
     duration_seconds: Optional[float] = None
     num_frames: Optional[int] = None
@@ -2239,9 +2341,32 @@ def _process_job(job: _Job) -> dict:
         _progress("uploading", 90)
 
         filename = Path(output_path).name
-        gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
+        target_bucket = p.get("gcs_bucket")
+        target_path = p.get("gcs_path")
+        
+        gcs_ok, gcs_url, gcs_uri, gcs_err = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=target_bucket,
+            target_path=target_path
+        )
+        
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_ok:
             full_url = gcs_url
+            # Generate thumbnail if we have a target bucket/path
+            if target_bucket and target_path:
+                thumb_path = target_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=target_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+            
             cleanup_local_file(output_path)
         else:
             full_url = f"http://localhost:{API_PORT}/download/{filename}"
@@ -2252,6 +2377,9 @@ def _process_job(job: _Job) -> dict:
             "job_id": job.job_id,
             "output_url": full_url,
             "video_url": full_url,
+            "gcs_uri": gcs_uri,
+            "thumbnail_url": thumbnail_url,
+            "thumbnail_gcs_uri": thumbnail_gcs_uri,
             "generation_time_seconds": round(gen_time, 2),
             "duration_seconds": actual_duration,
             "num_frames": num_frames,
@@ -2310,9 +2438,32 @@ def _process_job(job: _Job) -> dict:
         _progress("uploading", 90)
 
         filename = Path(output_path).name
-        gcs_ok, gcs_url, gcs_err = upload_to_gcs(output_path, filename)
+        target_bucket = p.get("gcs_bucket")
+        target_path = p.get("gcs_path")
+
+        gcs_ok, gcs_url, gcs_uri, gcs_err = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=target_bucket,
+            target_path=target_path
+        )
+        
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_ok:
             full_url = gcs_url
+            # Generate thumbnail if we have a target bucket/path
+            if target_bucket and target_path:
+                thumb_path = target_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=target_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+                    
             cleanup_local_file(output_path)
         else:
             full_url = f"http://localhost:{API_PORT}/download/{filename}"
@@ -2323,6 +2474,9 @@ def _process_job(job: _Job) -> dict:
             "job_id": job.job_id,
             "output_url": full_url,
             "video_url": full_url,
+            "gcs_uri": gcs_uri,
+            "thumbnail_url": thumbnail_url,
+            "thumbnail_gcs_uri": thumbnail_gcs_uri,
             "generation_time_seconds": round(gen_time, 2),
             "num_frames": metadata.get("num_frames", num_frames),
             "width": metadata["width"],
@@ -2493,7 +2647,13 @@ async def generate_image(request: ZImageRequest, http_request: Request):
         filename = Path(output_path).name
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename, content_type="image/png")
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename, 
+            content_type="image/png",
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
         if gcs_success:
             full_url = gcs_url
@@ -2510,6 +2670,7 @@ async def generate_image(request: ZImageRequest, http_request: Request):
             job_id=filename.replace(".png", ""),
             output_url=full_url,
             image_url=full_url,
+            gcs_uri=gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             width=metadata["width"],
             height=metadata["height"],
@@ -2611,11 +2772,31 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
         job_id = filename.replace(".mp4", "")
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_success:
             # Use the GCS signed URL
             full_url = gcs_url
+            
+            # Generate thumbnail if we have a target bucket/path
+            if request.gcs_bucket and request.gcs_path:
+                thumb_path = request.gcs_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=request.gcs_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+
             # Clean up local file after successful upload
             cleanup_local_file(output_path)
         else:
@@ -2629,6 +2810,9 @@ async def generate_ltx2_i2v(request: LTX2ImageToVideoRequest, http_request: Requ
             job_id=job_id,
             output_url=full_url,
             video_url=full_url,
+            gcs_uri=gcs_uri,
+            thumbnail_url=thumbnail_url,
+            thumbnail_gcs_uri=thumbnail_gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -2787,11 +2971,31 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
         job_id = filename.replace(".mp4", "")
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_success:
             # Use the GCS signed URL
             full_url = gcs_url
+            
+            # Generate thumbnail if we have a target bucket/path
+            if request.gcs_bucket and request.gcs_path:
+                thumb_path = request.gcs_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=request.gcs_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+
             # Clean up local file after successful upload
             cleanup_local_file(output_path)
         else:
@@ -2805,6 +3009,9 @@ async def generate_wan22_i2v(request: Wan22ImageToVideoRequest, http_request: Re
             job_id=job_id,
             output_url=full_url,
             video_url=full_url,
+            gcs_uri=gcs_uri,
+            thumbnail_url=thumbnail_url,
+            thumbnail_gcs_uri=thumbnail_gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=output_num_frames,
@@ -2930,10 +3137,30 @@ async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: 
         job_id = filename.replace(".mp4", "")
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_success:
             full_url = gcs_url
+            
+            # Generate thumbnail if we have a target bucket/path
+            if request.gcs_bucket and request.gcs_path:
+                thumb_path = request.gcs_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=request.gcs_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+
             # Clean up local file after successful upload
             cleanup_local_file(output_path)
         else:
@@ -2954,6 +3181,9 @@ async def generate_wan22_i2v(request: SVI2ProImageToVideoRequest, http_request: 
             job_id=job_id,
             output_url=full_url,
             video_url=full_url,
+            gcs_uri=gcs_uri,
+            thumbnail_url=thumbnail_url,
+            thumbnail_gcs_uri=thumbnail_gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=output_num_frames,
@@ -3029,10 +3259,30 @@ async def generate_i2v_base64(request: ImageToVideoRequest, http_request: Reques
         actual_duration = frames_to_duration(num_frames, fps)
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_success:
             full_url = gcs_url
+            
+            # Generate thumbnail if we have a target bucket/path
+            if request.gcs_bucket and request.gcs_path:
+                thumb_path = request.gcs_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=request.gcs_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+
             # Clean up local file after successful upload
             cleanup_local_file(output_path)
         else:
@@ -3046,6 +3296,9 @@ async def generate_i2v_base64(request: ImageToVideoRequest, http_request: Reques
             job_id=filename.replace(".mp4", ""),
             output_url=full_url,
             video_url=full_url,
+            gcs_uri=gcs_uri,
+            thumbnail_url=thumbnail_url,
+            thumbnail_gcs_uri=thumbnail_gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
@@ -3088,10 +3341,30 @@ async def generate_t2v(request: TextToVideoRequest, http_request: Request):
         actual_duration = frames_to_duration(num_frames, fps)
         
         # Upload to GCS and get signed URL
-        gcs_success, gcs_url, gcs_error = upload_to_gcs(output_path, filename)
+        gcs_success, gcs_url, gcs_uri, gcs_error = upload_to_gcs(
+            output_path, 
+            filename,
+            target_bucket=request.gcs_bucket,
+            target_path=request.gcs_path
+        )
         
+        thumbnail_url = None
+        thumbnail_gcs_uri = None
         if gcs_success:
             full_url = gcs_url
+            
+            # Generate thumbnail if we have a target bucket/path
+            if request.gcs_bucket and request.gcs_path:
+                thumb_path = request.gcs_path.rsplit('.', 1)[0] + "_thumb.jpg"
+                t_ok, t_url, t_uri, t_err = generate_thumbnail_to_gcs(
+                    output_path,
+                    target_bucket=request.gcs_bucket,
+                    target_path=thumb_path
+                )
+                if t_ok:
+                    thumbnail_url = t_url
+                    thumbnail_gcs_uri = t_uri
+
             # Clean up local file after successful upload
             cleanup_local_file(output_path)
         else:
@@ -3105,6 +3378,9 @@ async def generate_t2v(request: TextToVideoRequest, http_request: Request):
             job_id=filename.replace(".mp4", ""),
             output_url=full_url,
             video_url=full_url,
+            gcs_uri=gcs_uri,
+            thumbnail_url=thumbnail_url,
+            thumbnail_gcs_uri=thumbnail_gcs_uri,
             generation_time_seconds=round(gen_time, 2),
             duration_seconds=actual_duration,
             num_frames=num_frames,
