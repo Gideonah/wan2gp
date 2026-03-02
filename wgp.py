@@ -69,7 +69,7 @@ import shutil
 import glob
 import cv2
 import html
-from gradio_rangeslider import RangeSlider
+#from gradio_rangeslider import RangeSlider
 import re
 from transformers.utils import logging
 logging.set_verbosity_error
