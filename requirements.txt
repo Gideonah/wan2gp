@@ -1,3 +1,5 @@
+--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/
+mmgp==3.7.6
 # Core AI stack
 diffusers==0.36.0
 transformers==4.54.0 #4.53.1
@@ -34,13 +36,15 @@ loguru
 s3tokenizer
 conformer==0.3.2
 spacy_pkuseg
-spacy==3.8.4
+spacy
+gradio_rangeslider
 
 # Vision & segmentation
 opencv-python>=4.12.0.88
 segment-anything
 rembg[gpu]==2.0.65
-onnxruntime-gpu==1.22
+onnxruntime-gpu==1.22.0; python_version < "3.11"
+onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11"
 decord
 timm
 
@@ -51,6 +55,7 @@ timm
 facexlib==0.3.0
 taichi
 vector_quantize_pytorch==1.27.19 
+
 
 # chumpy wheel hosted on GitHub to avoid sdist build isolation issue
 chumpy @ https://github.com/deepbeepmeep/chumpy/releases/download/v0.71/chumpy-0.71-py3-none-any.whl
@@ -65,8 +70,11 @@ pydantic==2.10.6
 # Math & modeling
 torchdiffeq>=0.2.5
 tensordict>=0.6.1
+<<<<<<< HEAD
 
 mmgp==3.7.3
+=======
+>>>>>>> 1437067c1c41ea29c23474da8874dcdedb6ff7c1
 peft==0.17.0 # 0.15.0
 vector-quantize-pytorch
 matplotlib
@@ -93,6 +101,9 @@ python-multipart
 httpx
 
 
+xxhash
+munch
+wetext==0.1.2
 # Optional / commented out
 # transformers==4.46.3  # for llamallava pre-patch
 # rembg==2.0.65         # non-GPU fallback

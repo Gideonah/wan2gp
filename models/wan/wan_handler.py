@@ -215,6 +215,9 @@ class family_handler():
         if base_model_type in ["vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]:
             extra_model_def["parent_model_type"] = "vace_14B"
 
+        if base_model_type in ["alpha2"]:
+            extra_model_def["parent_model_type"] = "alpha"
+
         group = "wan"
         if base_model_type in ["t2v_2_2", "vace_14B_2_2"] or test_i2v_2_2(base_model_type):
             profiles_dir = "wan_2_2"
@@ -869,6 +872,11 @@ class family_handler():
         if model_def.get("self_refiner",False) and settings_version < 2.48:
             ui_defaults["self_refiner_f_uncertainty"] = 0.1
             ui_defaults["self_refiner_certain_percentage"] = 0.999
+        if settings_version < 2.52:
+            plan = ui_defaults.get("self_refiner_plan")
+            if isinstance(plan, list):
+                from shared.utils.self_refiner import convert_refiner_list_to_string
+                ui_defaults["self_refiner_plan"] = convert_refiner_list_to_string(plan)
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):

@@ -8,7 +8,7 @@
 WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, Z-Image, LongCat, Kandinsky, LTXV, LTX-2, Qwen3 TTS, Chatterbox, HearMula, ... with:
 - Low VRAM requirements (as low as 6 GB of VRAM is sufficient for certain models)
 - Support for old Nvidia GPUs (RTX 10XX, 20xx, ...)
-- Support for AMD GPUs Radeon RX 76XX, 77XX, 78XX & 79XX, instructions in the Installation Section Below.
+- Support for AMD GPUs (RDNA 4, 3, 3.5, and 2), instructions in the Installation Section Below.
 - Very Fast on the latest GPUs
 - Easy to use Full Web based interface
 - Support for many checkpoint Quantized formats: int8, fp8, gguf, NV FP4, Nunchaku
@@ -33,6 +33,87 @@ WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, 
 
 
 ## 🔥 Latest Updates : 
+### February 19th 2026: WanGP v10.951, Breaking the Sound Barrier, Mach 2
+Here comes the (last ?) missing bit in WanGP of the *Text To Speech* offering: **emotions**
+
+There isnt many TTS models around that let you express emotions, so I hope you will forgive me for adding an old TTS model (6 months old!) in WanGP: **Index TTS 2**.
+
+But in WanGP, you wont just get the vanilla version of Index TTS:
+- *Two speakers Dialogue* (with 2 Cloned Voices) out of the Box
+- Each speaker can express *varrying emotions* within the same prompt   
+- *Volume Normalization* of the two speaker voices (no one will speak louder)
+- Optimized for a *dialogue that can last forever* (new *infinitalk* best friend)
+- *GPU Poor version*: VRAM, 6GB will be sufficient
+- Highly Optimized with *vllm* & *Cuda Graph acceleration*: *up to 10x faster* than vanilla Index TTS. On high end GPUs, generating a 1 min of dialogue will take only 30s !
+
+Here is how to use it: By default Index TTS, will detect automatically the emotion to apply to a Text Prompt based on the text itself. However, it will apply the same emotion for the whole prompt. If you want a different emotion per sentence, just insert empty lines between each sentence.
+
+You can also set manually which emotion you expect with [] tags, here is one example for one speaker:
+```bash
+[fear] At the very beginning I was so afraid to speak.
+[sadness] Nobody would talk to me. I felt so alone.
+[disgust] They would just ignore me and pretend that I didnt exist
+[happy] By chance I discovered this wonderful App, and now everything is different.
+[anger] I have a new voice and now everybody will have no choice but to listen to my words !!! 
+```
+You can mix emotions *[sadness,disgust]* or if you want to precise the weight of one or several emotions *[sadness=0.7,disgust]* (in any case total of weights is 1)
+
+Remember two speakers mode requires to insert *"Speaker 1:"* & *"Speaker 2:"* to indicate who is talking.
+
+There is only one snag: Index TTS 2 supports only English & Chinese. But dont' panic ! not all is lost. There is a workaround:
+1) Feed *Index TTS 2* with the voice to clone and ask it to generate a sample English spoken text with with the emotion you expected
+2) Now ask *Qwen3TTS*, to clone this newly generated voice sample (in English) in the other language you want
+
+
+### February 16th 2026: WanGP v10.9, Breaking the Sound Barrier
+With this new release of WanGP you should have the best TTS (Text To Speech) experience you can find:
+
+- **Qwen3 TTS Powered Up**:  
+   - with new *Cuda Graph* optimized mode, speech generation is up to *4x faster*, in some occasion generating 1s of speech may take less than 1s !
+   - with int8 quantization, the Qwen3 TTS can work at full speed with only 6 GB of VRAM
+   - New **Two Speakers Mode** with **Two Cloned Voices** can generate dialogues with much smoother transitions than with *Kugel Audio* 
+
+- **Heart Mula Powered Up**:
+   - with new *Cuda Graph* optimized mode, song generation is up to 6x faster
+
+- **Ace Step 1.5 Powered Up**:
+   - WanGP version offers an exclusive support for *vllm* & *int8 quantization* for LM (that is fast LM & low VRAM at the same time)
+   - you will only need 10GB of RAM and 6 GB oF VRAM, to run Ace Step with all its features
+
+Also you now have a choice of multiple *Prompt Enhancements* for *Qwen3 TTS* & *Kugel Audio*: *Prompt Enhancer* can now generate for you either a *Monologue* or a *Dialogue between two Speakers*
+
+Please note that to use the new *Cuda Graph*, mode you will need to select either *vllm* or *cuda graph* in *Configuration / Performance / Language Models Decoder Engine*. Profiles 1,3  or 3+ will need to be enabled for the corresponding Model. vllm is a powered up version of cuda graph that may not always work with all GPUs. But don't worry if it is not available for your GPU there will be an automatic fallback to cuda graph.
+
+### February 12th 2026: WanGP v10.84, Easy Metal
+
+- **Ace Step 1.5 Turbo Super Charged**: all the best features of *Ace Step 1.5* are now in *WanGP* and are *Fast* & *Easy* to use:
+   * Manual Selection of *Bpm*, *Keyscale*, *Time Signature* & *Language*
+   * Use *LM* to auto detect *Bpm*, *Keyscale*, *Time Signature* & *Language* that best suits your *Lyrics*
+   * Use *LM* to refine *Music Caption* or auto detect *Song Duration*
+   * Choice of *vllm* engine for *LM* for up to *10x faster LM generation!!!*. Also as a WanGP exclusive, *vllm* is offered in *INT8 quantized* format for lower VRAM requirements. Please note you will need to install *Triton* and *Flash Attention 2* (check the *INSTALLATION.Md* for easy install)
+   * Use *LM* to refine *Music Caption* (usually the key to get the song theme you expected)
+   * UI Makeover to better match vocabulary used in original Ace Step App (but without its complexity...)
+   * Refined *System Prompt* used in *Prompt Enhancer* to generate *Lyrics* (I recommend to use the *LLama Joy Prompt Enhancer*)
+
+- **LoKr support**: this "Lora" like format has been tested with *Flux Klein 9B*
+
+- **Optimized Int8 Kernels**: all the *Quantized INT8 checkpoints* (most of the quantized checkpoints) used with WanGP should be now *10% faster !!!*. You will need to install *Triton*. It is experimental, so for the moment it needs to be enabled manually in the *Config / Performance* tab. Please share your feedback on *discord* by mentioning your GPU so that I know if it works properly.
+
+- **Auto Queue Saved if Gen Error**: if for whatever reason you have got an error during a Gen, the queue will now be automatically saved. So you can try again this queue later (with a different config or when the related bug is fixed, if ever ...).
+
+- **UI Updates** (thx *Tophness!*):
+Updated the *Self-Refiner UI* to a dynamic, slider-based interface (no more manual text input).
+Improved queue reordering: items can now be dragged and dropped directly onto the Top and Bottom buttons while rearranging the queue in order to snap scroll to the top and bottom.
+
+- **Kugel Audio Audio Split**: Kugel Audio is a great model but strangely it tends to accelerate with long speeches. In order to avoid this effect, we need to split audio speeches. You can either do that manually by inserting an *Empty Line* or by specifiying an *Auto Audio Split Duration* (don't worry WanGP will try to split between lines or sentences). 
+
+*update 10.81*: Fixes\
+*update 10.82*: UI update\
+*update 10.83*: Kugel Audio Split\
+*update 10.84*: Ace Step RAM optimizations (fixed memory leak & reduce RAM requirements)
+
+**Note to RTX 50xx owners**: you will need to upgrade to *pytorch 2.10* (see upgrade procedure below) to be able to use *Triton*
+
 ### February 4rd 2026: WanGP v10.70, Let's Get Ready To Rumble !
 *The competition between Open Source & Close Source has never been that hot !*
 
@@ -251,7 +332,7 @@ conda activate wan2gp
 pip install -r requirements.txt
 ```
 
-**Update the application (upgrade from python 3.10 to 3.11):**
+**Upgrade to 3.11, Pytorch 2.10, Cuda 13/13.1** (for non GTX10xx users)
 I recommend creating a new conda env for the Python 3.11 to avoid bad surprises. Let's call the new conda env *wangp* (instead of *wan2gp* the old name of this project)
 Get in the directory where WanGP is installed and:
 ```bash
@@ -262,7 +343,8 @@ pip install torch==2.10.0 torchvision torchaudio --index-url https://download.py
 pip install -r requirements.txt
 ```
 
-Once you are done you will have to reinstall *Sage Attention*, *Triton*, *Flash Attention* (if installed). Check the **[Installation Guide](docs/INSTALLATION.md)** -
+**Git Errors**
+Once you are done you will have to reinstall *Sage Attention*, *Triton*, *Flash Attention*. Check the **[Installation Guide](docs/INSTALLATION.md)** -
 
 if you get some error messages related to git, you may try the following (beware this will overwrite local changes made to the source code of WanGP):
 ```bash
@@ -318,7 +400,7 @@ For detailed installation instructions for different GPU generations:
 
 ### AMD
 For detailed installation instructions for different GPU generations:
-- **[Installation Guide](docs/AMD-INSTALLATION.md)** - Complete setup instructions for Radeon RX 76XX, 77XX, 78XX & 79XX
+- **[Installation Guide](docs/AMD-INSTALLATION.md)** - Complete setup instructions for RDNA 4, 3, 3.5, and 2
 
 ## 🎯 Usage
 
