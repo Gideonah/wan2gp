@@ -156,6 +156,7 @@ def detect_best_attention_mode() -> str:
 
 # Detect attention mode at import time
 DETECTED_ATTENTION_MODE = detect_best_attention_mode()
+ZIMAGE_ATTENTION_MODE = os.environ.get("WAN2GP_ZIMAGE_ATTENTION_MODE", "sdpa").strip().lower() or "sdpa"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -1349,11 +1350,13 @@ def generate_image_internal(
     
     print(f"🖼️ Generating image: {prompt[:50]}...")
     print(f"   Resolution: {width}x{height}, Steps: {num_inference_steps}")
+    print(f"   Attention mode: {ZIMAGE_ATTENTION_MODE}")
     
     start_time = time.time()
     
-    # Set up offload shared state - use detected attention mode
-    offload.shared_state["_attention"] = DETECTED_ATTENTION_MODE
+    # Z-Image can show speckle artifacts on some GPUs with Sage kernels.
+    # Default to SDPA for stability (override with WAN2GP_ZIMAGE_ATTENTION_MODE).
+    offload.shared_state["_attention"] = ZIMAGE_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
     offload.shared_state["_nag_scale"] = 1.0
