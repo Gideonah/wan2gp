@@ -560,6 +560,7 @@ class ZImageRequest(BaseModel):
     gcs_path: Optional[str] = Field(None, description="Target GCS object path")
     
     class Config:
+        extra = "allow"
         json_schema_extra = {
             "example": {
                 "prompt": "A majestic lion in a savanna at sunset, photorealistic, 8k",
@@ -1115,7 +1116,10 @@ def load_wan2gp_model(model_type: str = DEFAULT_MODEL_TYPE, profile: int = DEFAU
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(base_model_type)
     
-    model_instance, offloadobj = load_models(model_type, override_profile=profile)
+    # IMPORTANT: wgp.load_models defaults output_type to "video".
+    # Z-Image turbo must be loaded in image mode to match Gradio behavior.
+    output_type = "image" if get_model_family(model_type) == "z_image" else "video"
+    model_instance, offloadobj = load_models(model_type, override_profile=profile, output_type=output_type)
     current_model_type = model_type
     current_base_model_type = base_model_type  # Store base model type for generate()
     current_model_family = get_model_family(model_type)
@@ -1373,6 +1377,10 @@ def generate_image_internal(
             guide_scale=guidance_scale,
             seed=seed,
             callback=progress_callback,
+            image_mode=1,
+            model_type=current_base_model_type,
+            offloadobj=offloadobj,
+            set_header_text=lambda txt: print(f"   Phase: {txt}"),
             # loras_slists: NOT passed - let model use its internal LoRA configuration
         )
         
@@ -2670,8 +2678,18 @@ async def generate_image(request: ZImageRequest, http_request: Request):
             height=height_value,
         )
         
+        prompt_text = request.prompt.strip()
+        if not prompt_text:
+            # Gradio wizard flow can carry text in wizard_prompt.
+            wizard_prompt = (getattr(request, "wizard_prompt", "") or "").strip()
+            if wizard_prompt:
+                prompt_text = wizard_prompt
+
+        if not prompt_text:
+            raise HTTPException(status_code=400, detail="Prompt is empty. Provide 'prompt' (or 'wizard_prompt').")
+
         output_path, gen_time, metadata = generate_image_internal(
-            prompt=request.prompt,
+            prompt=prompt_text,
             negative_prompt=request.negative_prompt,
             width=width,
             height=height,
