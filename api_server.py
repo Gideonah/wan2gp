@@ -2503,6 +2503,80 @@ def _process_job(job: _Job) -> dict:
             "seed": metadata["seed"],
         }
 
+    # ── Z-IMAGE (Text-to-Image) ──────────────────────────────────────────
+    if endpoint == "image":
+        if model_instance is None or current_model_family != "z_image":
+            return {"status": "error", "message": "z_image model not loaded"}
+
+        _progress("preparing", 5)
+        parsed_width, parsed_height, parsed_preset = parse_resolution_value(p.get("resolution"))
+        resolution_preset = p.get("resolution_preset", "1024")
+        width_value = p.get("width")
+        height_value = p.get("height")
+
+        if parsed_width is not None and parsed_height is not None and width_value is None and height_value is None:
+            width_value = parsed_width
+            height_value = parsed_height
+            resolution_preset = None
+        elif parsed_preset and not width_value and not height_value:
+            resolution_preset = parsed_preset
+
+        width, height = resolve_resolution(
+            "z_image",
+            resolution_preset=resolution_preset,
+            width=width_value,
+            height=height_value,
+        )
+
+        prompt_text = str(p.get("prompt", "") or "").strip()
+        if not prompt_text:
+            prompt_text = str(p.get("wizard_prompt", "") or "").strip()
+        if not prompt_text:
+            return {"status": "error", "message": "Prompt is empty for image generation"}
+
+        _progress("generating", 10)
+        output_path, gen_time, metadata = generate_image_internal(
+            prompt=prompt_text,
+            negative_prompt=p.get("negative_prompt", ""),
+            width=width,
+            height=height,
+            num_inference_steps=p.get("num_inference_steps", 8),
+            guidance_scale=p.get("guidance_scale", 0.0),
+            seed=p.get("seed", -1),
+            batch_size=p.get("batch_size", 1),
+        )
+        _progress("uploading", 90)
+
+        filename = Path(output_path).name
+        target_bucket = p.get("gcs_bucket")
+        target_path = p.get("gcs_path")
+        gcs_ok, gcs_url, gcs_uri, gcs_err = upload_to_gcs(
+            output_path,
+            filename,
+            content_type="image/png",
+            target_bucket=target_bucket,
+            target_path=target_path,
+        )
+
+        if gcs_ok:
+            full_url = gcs_url
+            cleanup_local_file(output_path)
+        else:
+            full_url = f"http://localhost:{API_PORT}/download/{filename}"
+
+        _progress("done", 100)
+        return {
+            "status": "success",
+            "job_id": job.job_id,
+            "output_url": full_url,
+            "image_url": full_url,
+            "gcs_uri": gcs_uri,
+            "generation_time_seconds": round(gen_time, 2),
+            "width": metadata["width"],
+            "height": metadata["height"],
+            "seed": metadata["seed"],
+        }
+
     return {"status": "error", "message": f"Unknown endpoint: {endpoint}"}
 
 
@@ -3585,6 +3659,28 @@ async def submit_wan22_i2v(request: Union[Wan22ImageToVideoRequest, SVI2ProImage
     )
     _job_store.submit(job)
     print(f"📥 Submitted job {job_id} (wan22/i2v), queue depth: {_job_store._queue.qsize()}")
+
+    return SubmitResponse(status="accepted", job_id=job_id, message="Job queued for processing")
+
+
+@app.post("/submit/image", response_model=SubmitResponse)
+async def submit_zimage(request: ZImageRequest, http_request: Request):
+    """
+    Submit a Z-Image generation job for async processing.
+    See /submit/ltx2/i2v for callback/job_id details.
+    """
+    body = await http_request.json()
+    job_id = body.get("job_id") or str(uuid.uuid4())[:12]
+
+    job = _Job(
+        job_id=job_id,
+        endpoint="image",
+        payload=body,
+        callback_url=body.get("callback_url"),
+        callback_secret=body.get("callback_secret", ""),
+    )
+    _job_store.submit(job)
+    print(f"📥 Submitted job {job_id} (image), queue depth: {_job_store._queue.qsize()}")
 
     return SubmitResponse(status="accepted", job_id=job_id, message="Job queued for processing")
 

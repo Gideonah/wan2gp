@@ -1,0 +1,76 @@
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ARG CUDA_ARCHITECTURES="8.0;8.6;8.9"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt update && \
+    apt install -y --no-install-recommends \
+    python3 python3-pip git wget curl cmake ninja-build \
+    libgl1 libglib2.0-0 ffmpeg ca-certificates && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /workspace
+
+COPY requirements.txt .
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
+RUN pip install -r requirements.txt
+
+ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
+ENV FORCE_CUDA="1"
+ENV MAX_JOBS="1"
+
+COPY <<EOF /tmp/patch_setup.py
+import os
+with open('setup.py', 'r') as f:
+    content = f.read()
+
+arch_list = os.environ.get('TORCH_CUDA_ARCH_LIST')
+arch_set = '{' + ', '.join([f'"{arch}"' for arch in arch_list.split(';')]) + '}'
+
+old_section = '''compute_capabilities = set()
+device_count = torch.cuda.device_count()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 8:
+        warnings.warn(f"skipping GPU {i} with compute capability {major}.{minor}")
+        continue
+    compute_capabilities.add(f"{major}.{minor}")'''
+
+new_section = 'compute_capabilities = ' + arch_set + '''
+print(f"Manually set compute capabilities: {compute_capabilities}")'''
+
+content = content.replace(old_section, new_section)
+
+with open('setup.py', 'w') as f:
+    f.write(content)
+EOF
+
+RUN git clone https://github.com/thu-ml/SageAttention.git && \
+    cd SageAttention && \
+    python3 /tmp/patch_setup.py && \
+    EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=32 python3 setup.py install && \
+    cd .. && rm -rf SageAttention /tmp/patch_setup.py /root/.cache/* || \
+    echo "⚠️  SageAttention skipped (no CUDA during build)"
+
+COPY . /workspace/
+
+RUN mkdir -p /workspace/outputs /workspace/ckpts /var/log/wan2gp
+RUN chmod +x /workspace/start_vastai.sh /workspace/start_pyworker.sh /workspace/entrypoint_api.sh 2>/dev/null || true
+
+ENV HF_HOME=/workspace/.cache/huggingface
+ENV WAN2GP_MODEL_TYPE="z_image"
+ENV WAN2GP_PROFILE="3"
+ENV WAN2GP_OUTPUT_DIR="/workspace/outputs"
+ENV WAN2GP_SKIP_SHARED_DOWNLOADS="1"
+ENV MODEL_SERVER_PORT="8000"
+ENV WAN2GP_LOG_FILE="/var/log/wan2gp/server.log"
+
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s \
+    CMD curl -f http://localhost:80/health || exit 1
+
+CMD ["/workspace/start_vastai.sh"]
