@@ -156,7 +156,8 @@ def detect_best_attention_mode() -> str:
 
 # Detect attention mode at import time
 DETECTED_ATTENTION_MODE = detect_best_attention_mode()
-ZIMAGE_ATTENTION_MODE = os.environ.get("WAN2GP_ZIMAGE_ATTENTION_MODE", "sdpa").strip().lower() or "sdpa"
+# Match Gradio behavior by default (auto-detected attention), with optional override.
+ZIMAGE_ATTENTION_MODE = os.environ.get("WAN2GP_ZIMAGE_ATTENTION_MODE", DETECTED_ATTENTION_MODE).strip().lower() or DETECTED_ATTENTION_MODE
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -554,6 +555,11 @@ class ZImageRequest(BaseModel):
     
     num_inference_steps: int = Field(8, ge=4, le=20, description="Number of denoising steps (8 for turbo)")
     guidance_scale: float = Field(0.0, ge=0.0, le=10.0, description="CFG scale (0 for turbo)")
+    embedded_guidance_scale: float = Field(6.0, ge=0.0, le=20.0, description="Embedded guidance scale (matches Gradio default)")
+    flow_shift: float = Field(5.0, ge=0.0, le=20.0, description="Flow shift parameter (matches Gradio default)")
+    alt_guidance_scale: float = Field(1.0, ge=0.0, le=20.0, description="Alt guidance scale (matches Gradio default)")
+    sample_solver: Optional[str] = Field("", description="Optional sample solver (empty = model default)")
+    temperature: float = Field(0.8, ge=0.0, le=2.0, description="Sampling temperature (matches Gradio default)")
     seed: int = Field(-1, description="Random seed (-1 for random)")
     batch_size: int = Field(1, ge=1, le=4, description="Number of images to generate")
     
@@ -1332,6 +1338,11 @@ def generate_image_internal(
     height: int = 1024,
     num_inference_steps: int = 8,
     guidance_scale: float = 0.0,
+    embedded_guidance_scale: float = 6.0,
+    flow_shift: float = 5.0,
+    alt_guidance_scale: float = 1.0,
+    sample_solver: Optional[str] = "",
+    temperature: float = 0.8,
     seed: int = -1,
     batch_size: int = 1,
 ) -> tuple[str, float, dict]:
@@ -1351,11 +1362,11 @@ def generate_image_internal(
     print(f"🖼️ Generating image: {prompt[:50]}...")
     print(f"   Resolution: {width}x{height}, Steps: {num_inference_steps}")
     print(f"   Attention mode: {ZIMAGE_ATTENTION_MODE}")
+    print(f"   flow_shift={flow_shift}, embedded_guidance_scale={embedded_guidance_scale}")
     
     start_time = time.time()
     
-    # Z-Image can show speckle artifacts on some GPUs with Sage kernels.
-    # Default to SDPA for stability (override with WAN2GP_ZIMAGE_ATTENTION_MODE).
+    # Keep attention aligned with Gradio auto mode unless explicitly overridden.
     offload.shared_state["_attention"] = ZIMAGE_ATTENTION_MODE
     offload.shared_state["_chipmunk"] = False
     offload.shared_state["_radial"] = False
@@ -1379,6 +1390,11 @@ def generate_image_internal(
             height=height,
             sampling_steps=num_inference_steps,
             guide_scale=guidance_scale,
+            embedded_guidance_scale=embedded_guidance_scale,
+            shift=flow_shift,
+            alt_guide_scale=alt_guidance_scale,
+            sample_solver=sample_solver if sample_solver else "",
+            temperature=temperature,
             seed=seed,
             callback=progress_callback,
             image_mode=1,
@@ -2545,6 +2561,11 @@ def _process_job(job: _Job) -> dict:
             height=height,
             num_inference_steps=p.get("num_inference_steps", 8),
             guidance_scale=p.get("guidance_scale", 0.0),
+            embedded_guidance_scale=p.get("embedded_guidance_scale", 6.0),
+            flow_shift=p.get("flow_shift", 5.0),
+            alt_guidance_scale=p.get("alt_guidance_scale", 1.0),
+            sample_solver=p.get("sample_solver", ""),
+            temperature=p.get("temperature", 0.8),
             seed=p.get("seed", -1),
             batch_size=p.get("batch_size", 1),
         )
@@ -2759,6 +2780,11 @@ async def generate_image(request: ZImageRequest, http_request: Request):
             height=height,
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
+            embedded_guidance_scale=request.embedded_guidance_scale,
+            flow_shift=request.flow_shift,
+            alt_guidance_scale=request.alt_guidance_scale,
+            sample_solver=request.sample_solver,
+            temperature=request.temperature,
             seed=request.seed,
             batch_size=request.batch_size,
         )
