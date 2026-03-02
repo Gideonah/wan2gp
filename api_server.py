@@ -543,6 +543,10 @@ class ZImageRequest(BaseModel):
         "1024",
         description="Resolution preset: 512, 768, 1024, landscape, portrait, wide"
     )
+    resolution: Optional[str] = Field(
+        None,
+        description="Gradio-compatible resolution string (e.g. '1920x1088' or preset name)"
+    )
     width: Optional[int] = Field(None, description="Image width (must be multiple of 64)")
     height: Optional[int] = Field(None, description="Image height (must be multiple of 64)")
     
@@ -938,6 +942,26 @@ def resolve_resolution(
     h = max(256, h)
     
     return w, h
+
+
+def parse_resolution_value(resolution: Optional[str]) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """
+    Parse Gradio-style resolution values.
+    Returns (width, height, preset) where only one mode is populated.
+    """
+    if not resolution:
+        return None, None, None
+
+    value = str(resolution).strip().lower()
+    if "x" in value:
+        parts = value.split("x", 1)
+        if len(parts) == 2:
+            left = parts[0].strip()
+            right = parts[1].strip()
+            if left.isdigit() and right.isdigit():
+                return int(left), int(right), None
+
+    return None, None, value
 
 
 async def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
@@ -2626,11 +2650,24 @@ async def generate_image(request: ZImageRequest, http_request: Request):
     job_id = str(uuid.uuid4())[:8]
     
     try:
+        # Compatibility: allow Gradio-style "resolution" (e.g. "1920x1088")
+        parsed_width, parsed_height, parsed_preset = parse_resolution_value(request.resolution)
+        resolution_preset = request.resolution_preset
+        width_value = request.width
+        height_value = request.height
+
+        if parsed_width is not None and parsed_height is not None and width_value is None and height_value is None:
+            width_value = parsed_width
+            height_value = parsed_height
+            resolution_preset = None
+        elif parsed_preset and not width_value and not height_value:
+            resolution_preset = parsed_preset
+
         width, height = resolve_resolution(
             "z_image",
-            resolution_preset=request.resolution_preset,
-            width=request.width,
-            height=request.height,
+            resolution_preset=resolution_preset,
+            width=width_value,
+            height=height_value,
         )
         
         output_path, gen_time, metadata = generate_image_internal(
