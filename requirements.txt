@@ -70,11 +70,8 @@ pydantic==2.10.6
 # Math & modeling
 torchdiffeq>=0.2.5
 tensordict>=0.6.1
-<<<<<<< HEAD
 
 mmgp==3.7.3
-=======
->>>>>>> 1437067c1c41ea29c23474da8874dcdedb6ff7c1
 peft==0.17.0 # 0.15.0
 vector-quantize-pytorch
 matplotlib
