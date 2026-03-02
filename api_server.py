@@ -113,6 +113,7 @@ import uvicorn
 # Now it's safe to import from wgp/mmgp
 from mmgp import offload
 from shared.utils.audio_video import save_video
+from shared.utils.utils import convert_tensor_to_image
 from shared.utils.loras_mutipliers import parse_loras_multipliers
 from shared.attention import get_attention_modes, get_supported_attention_modes
 
@@ -1384,40 +1385,26 @@ def generate_image_internal(
             # loras_slists: NOT passed - let model use its internal LoRA configuration
         )
         
-        # Save image
+        # Save image using the same conversion helper as Wan2GP UI.
+        # This avoids subtle tensor format/range mismatches that can produce black outputs.
         if isinstance(result, dict):
-            image_tensor = result.get("x", result)
+            image_tensor = (
+                result.get("x")
+                or result.get("image")
+                or result.get("images")
+                or result.get("sample")
+                or result
+            )
         else:
             image_tensor = result
         
         # Convert tensor to PIL and save
         if hasattr(image_tensor, 'cpu'):
-            # Convert bf16 -> float32 before numpy (numpy doesn't support bf16)
-            img_tensor = image_tensor.squeeze().float().cpu()
-            
-            # Handle channel dimension (C, H, W) -> (H, W, C)
-            if img_tensor.dim() == 3 and img_tensor.shape[0] in (1, 3, 4):
-                img_tensor = img_tensor.permute(1, 2, 0)
-            
-            # Handle grayscale
-            if img_tensor.dim() == 3 and img_tensor.shape[-1] == 1:
-                img_tensor = img_tensor.squeeze(-1)
-            
-            img_np = img_tensor.numpy()
-            
-            # Z-Image outputs in range [-1, 1], need to convert to [0, 255]
-            # Check if values are in negative range (indicates -1 to 1 normalization)
-            if img_np.min() < 0:
-                # Range is [-1, 1] -> convert to [0, 1] first
-                img_np = (img_np + 1.0) / 2.0
-            
-            # Now convert [0, 1] to [0, 255]
-            if img_np.max() <= 1.0:
-                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
-            else:
-                img_np = img_np.clip(0, 255).astype(np.uint8)
-            
-            Image.fromarray(img_np).save(str(output_path))
+            if image_tensor.dim() == 5:
+                # (B, C, T, H, W) or similar -> pick first batch element
+                image_tensor = image_tensor[0]
+            pil_image = convert_tensor_to_image(image_tensor, frame_no=0)
+            pil_image.save(str(output_path))
         elif isinstance(image_tensor, Image.Image):
             image_tensor.save(str(output_path))
         else:
